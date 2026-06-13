@@ -1,0 +1,147 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.cyanheads/attack-surface-mcp-server",
+  "description": "Passive external attack-surface mapping: CT subdomains, DNS, TLS, HTTP posture, RDAP/WHOIS, Shodan.",
+  "repository": {
+    "url": "https://github.com/cyanheads/attack-surface-mcp-server",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@cyanheads/attack-surface-mcp-server",
+      "runtimeHint": "bun",
+      "version": "0.1.0",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "run"
+        },
+        {
+          "type": "positional",
+          "value": "start:stdio"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "SHODAN_API_KEY",
+          "description": "Optional Shodan API key. Enables attacksurface_lookup_host; absent → that one tool returns source_unavailable and the rest of the server works.",
+          "format": "string",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "CERTSPOTTER_API_KEY",
+          "description": "Optional Certspotter API key. Raises CT-fallback rate limits; absent → free unauthenticated tier.",
+          "format": "string",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "ATTACKSURFACE_DEFAULT_RESOLVERS",
+          "description": "Comma-separated default DNS resolver IPs for attacksurface_resolve_dns.",
+          "format": "string",
+          "isRequired": false,
+          "default": "8.8.8.8,1.1.1.1,9.9.9.9"
+        },
+        {
+          "name": "ATTACKSURFACE_HTTP_USER_AGENT",
+          "description": "Default User-Agent for attacksurface_probe_http (overridable per call).",
+          "format": "string",
+          "isRequired": false
+        },
+        {
+          "name": "ATTACKSURFACE_MAX_SUBDOMAINS",
+          "description": "Cap on subdomains resolved during a map_domain run.",
+          "format": "string",
+          "isRequired": false,
+          "default": "200"
+        },
+        {
+          "name": "ATTACKSURFACE_RDAP_BOOTSTRAP_URL",
+          "description": "RDAP bootstrap base URL; override for a private/mirrored RDAP.",
+          "format": "string",
+          "isRequired": false,
+          "default": "https://rdap.org"
+        },
+        {
+          "name": "ATTACKSURFACE_ALLOW_PRIVATE_TARGETS",
+          "description": "Set true to disable the SSRF guard for internal-network assessment (local/trusted deployments only).",
+          "format": "string",
+          "isRequired": false,
+          "default": "false"
+        },
+        {
+          "name": "MCP_LOG_LEVEL",
+          "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
+          "format": "string",
+          "isRequired": false,
+          "default": "info"
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      }
+    },
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@cyanheads/attack-surface-mcp-server",
+      "runtimeHint": "bun",
+      "version": "0.1.0",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "run"
+        },
+        {
+          "type": "positional",
+          "value": "start:http"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "MCP_HTTP_HOST",
+          "description": "The hostname for the HTTP server.",
+          "format": "string",
+          "isRequired": false,
+          "default": "127.0.0.1"
+        },
+        {
+          "name": "MCP_HTTP_PORT",
+          "description": "The port to run the HTTP server on.",
+          "format": "string",
+          "isRequired": false,
+          "default": "3010"
+        },
+        {
+          "name": "MCP_HTTP_ENDPOINT_PATH",
+          "description": "The endpoint path for the MCP server.",
+          "format": "string",
+          "isRequired": false,
+          "default": "/mcp"
+        },
+        {
+          "name": "MCP_AUTH_MODE",
+          "description": "Authentication mode to use: 'none', 'jwt', or 'oauth'.",
+          "format": "string",
+          "isRequired": false,
+          "default": "none"
+        },
+        {
+          "name": "MCP_LOG_LEVEL",
+          "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
+          "format": "string",
+          "isRequired": false,
+          "default": "info"
+        }
+      ],
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://localhost:3010/mcp"
+      }
+    }
+  ]
+}

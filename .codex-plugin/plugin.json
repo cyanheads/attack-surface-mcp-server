@@ -1,0 +1,33 @@
+{
+  "name": "attack-surface-mcp-server",
+  "version": "0.1.0",
+  "description": "Passive external attack-surface mapping: CT subdomains, DNS, TLS, HTTP posture, RDAP/WHOIS, Shodan.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/attack-surface-mcp-server",
+  "repository": "https://github.com/cyanheads/attack-surface-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "attack-surface",
+    "easm",
+    "recon",
+    "security"
+  ],
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "attack-surface-mcp-server",
+    "shortDescription": "Passive external attack-surface mapping: CT subdomains, DNS, TLS, HTTP posture, RDAP/WHOIS, Shodan.",
+    "longDescription": "Passive, non-intrusive external attack-surface mapping (EASM) for authorized, defensive security assessment. Discovers subdomains from Certificate Transparency logs, resolves DNS across multiple resolvers, inspects TLS posture, audits HTTP security headers and fingerprints technologies, and looks up RDAP/WHOIS registration. Optional Shodan host intelligence. Reads public records and the target's own published surface only — no port scanning, exploitation, or brute-forcing.",
+    "developerName": "cyanheads",
+    "category": "security",
+    "capabilities": ["Read"],
+    "websiteURL": "https://github.com/cyanheads/attack-surface-mcp-server",
+    "defaultPrompt": []
+  }
+}
