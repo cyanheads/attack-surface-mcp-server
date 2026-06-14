@@ -1,6 +1,6 @@
 {
   "name": "attack-surface-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Passive external attack-surface mapping: CT subdomains, DNS, TLS, HTTP posture, RDAP/WHOIS, Shodan.",
   "author": {
     "name": "cyanheads",
