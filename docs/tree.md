@@ -1,20 +1,23 @@
 # attack-surface-mcp-server - Directory Structure
 
-Generated on: 2026-06-13 16:32:35
+Generated on: 2026-08-21 15:03:56
 
 ```text
 attack-surface-mcp-server/
-├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
 ├── .codex-plugin/
 │   ├── mcp.json
 │   └── plugin.json
 ├── .github/
-│   └── ISSUE_TEMPLATE/
-│       ├── bug_report.yml
-│       ├── config.yml
-│       └── feature_request.yml
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.yml
+│   │   ├── config.yml
+│   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
+│   ├── FUNDING.yml
+│   └── SECURITY.md
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json
@@ -22,11 +25,11 @@ attack-surface-mcp-server/
 │   ├── 0.1.x/
 │   └── template.md
 ├── docs/
-│   ├── design.md
-│   └── idea.md
+│   └── design.md
 ├── scripts/
 │   ├── build-changelog.ts
 │   ├── build.ts
+│   ├── check-dependency-specifiers.ts
 │   ├── check-docs-sync.ts
 │   ├── check-framework-antipatterns.ts
 │   ├── check-skill-versions.ts
@@ -178,11 +181,43 @@ attack-surface-mcp-server/
 │   │   └── validation.ts
 │   └── index.ts
 ├── tests/
+│   ├── fuzz/
+│   │   ├── ct-service.fuzz.test.ts
+│   │   ├── dns-service.fuzz.test.ts
+│   │   ├── http-service.fuzz.test.ts
+│   │   ├── registration-service.fuzz.test.ts
+│   │   └── tls-service.fuzz.test.ts
+│   ├── integration/
+│   │   ├── enumerate-subdomains.tool.test.ts
+│   │   ├── inspect-tls.tool.test.ts
+│   │   ├── lookup-host.tool.test.ts
+│   │   ├── lookup-registration.tool.test.ts
+│   │   ├── map-domain.tool.test.ts
+│   │   ├── probe-http.tool.test.ts
+│   │   ├── recon-guidance.tool.test.ts
+│   │   └── resolve-dns.tool.test.ts
 │   ├── prompts/
 │   ├── resources/
-│   └── tools/
+│   ├── smoke/
+│   │   └── definitions.test.ts
+│   ├── tools/
+│   └── unit/
+│       └── services/
+│           ├── ct/
+│           │   └── ct-service.test.ts
+│           ├── dns/
+│           │   └── dns-service.test.ts
+│           ├── http/
+│           │   └── http-service.test.ts
+│           ├── registration/
+│           │   └── registration-service.test.ts
+│           ├── shodan/
+│           │   └── shodan-service.test.ts
+│           └── tls/
+│               └── tls-service.test.ts
 ├── .dockerignore
 ├── .env.example
+├── .gitattributes
 ├── .gitignore
 ├── .mcpbignore
 ├── AGENTS.md

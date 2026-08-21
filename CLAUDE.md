@@ -2,9 +2,9 @@
 
 **Server:** attack-surface-mcp-server
 **Version:** 0.1.1
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.10.6`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.12.3`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
+**MCP SDK:** `@modelcontextprotocol/server`/`client` ^2.0.0
 **Zod:** ^4.4.3
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -26,7 +26,6 @@ This is a defensive external-attack-surface-mapping (EASM) server. It is **passi
 - **Logic throws, framework catches.** Tool/resource handlers are pure — throw on failure, no `try/catch`. Plain `Error` is fine; the framework catches, classifies, and formats. Use error factories (`notFound()`, `validationError()`, etc.) when the error code matters.
 - **Use `ctx.log`** for request-scoped logging. No `console` calls.
 - **Use `ctx.state`** for tenant-scoped storage. Never access persistence directly.
-- **Check `ctx.elicit`** for presence before calling.
 - **Secrets in env vars only** — never hardcoded.
 - **Close the loop on issues.** When implementing work tracked by a GitHub issue, comment on the issue with what landed and close it. Do both — a comment without a close leaves stale issues open; a close without a comment leaves no record of what shipped. The comment is for future readers — state the concrete changes, not the conversation that produced them.
 
@@ -178,7 +177,7 @@ Handlers receive a unified `ctx` object. Key properties:
 | `ctx.requestId` | Unique request ID. |
 | `ctx.tenantId` | Tenant ID from JWT or `'default'` for stdio. |
 
-This server is stateless and non-interactive — it does not use `ctx.state`, `ctx.elicit`, or `ctx.progress`.
+This server is stateless and non-interactive — it does not use `ctx.state` or the `inputRequired` elicitation surface.
 
 ---
 
@@ -287,7 +286,6 @@ Available skills:
 | `tool-defs-analysis` | Read-only audit of MCP definition language across the surface — voice, leaks, defaults, recovery hints, output descriptions |
 | `security-pass` | Audit server for MCP-flavored security gaps: output injection, scope blast radius, input sinks, tenant isolation |
 | `code-simplifier` | Post-session cleanup against `git diff` — modernize syntax, consolidate duplication, align with the codebase |
-| `devcheck` | Lint, format, typecheck, audit |
 | `polish-docs-meta` | Finalize docs, README, metadata, and agent protocol for shipping |
 | `git-wrapup` | Land working-tree changes as a versioned commit + annotated tag — version bump, changelog, verify, tag. Local only. |
 | `release-and-publish` | Push + npm + MCP Registry + GH Release + Docker. Picks up from `git-wrapup` |
