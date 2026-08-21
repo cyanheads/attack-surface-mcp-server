@@ -24,7 +24,7 @@ const ResolverResultSchema = z
       .describe(
         'Records keyed by type (A/AAAA/CNAME/MX/NS/TXT/CAA); types with no answer are omitted.',
       ),
-    error: z
+    queryError: z
       .string()
       .nullable()
       .describe('Resolver-level error, or null when the query succeeded.'),
@@ -35,7 +35,7 @@ const ReverseResultSchema = z
   .object({
     ip: z.string().describe('IP that was reverse-resolved.'),
     hostnames: z.array(z.string()).describe('PTR hostnames; empty when none exist.'),
-    error: z.string().nullable().describe('Reverse-lookup error, or null on success.'),
+    lookupError: z.string().nullable().describe('Reverse-lookup error, or null on success.'),
   })
   .describe('A reverse-DNS (PTR) result for one IP.');
 
@@ -54,7 +54,7 @@ const HostResultSchema = z
       .array(ReverseResultSchema)
       .optional()
       .describe('Reverse-DNS (PTR) results for resolved IPs, when reverse was requested.'),
-    error: z.string().nullable().describe('Host-level error (e.g. blocked target), or null.'),
+    hostError: z.string().nullable().describe('Host-level error (e.g. blocked target), or null.'),
   })
   .describe('Aggregate DNS result for one host across all queried resolvers.');
 
@@ -173,7 +173,7 @@ export const resolveDnsTool = tool('attacksurface_resolve_dns', {
     for (const r of result.results) {
       lines.push(`## ${r.host}`);
       lines.push(`**Resolved:** ${r.resolved ? 'yes' : 'no'}`);
-      if (r.error) lines.push(`**Error:** ${r.error}`);
+      if (r.hostError) lines.push(`**Error:** ${r.hostError}`);
       const types = Object.keys(r.records) as DnsRecordType[];
       for (const t of types) {
         lines.push(`**${t}:** ${(r.records[t] ?? []).join(', ')}`);
@@ -186,14 +186,14 @@ export const resolveDnsTool = tool('attacksurface_resolve_dns', {
           .map(([t, vals]) => `${t}=[${vals.join(', ')}]`)
           .join(' ');
         lines.push(
-          `- _${rr.resolver}_ — ${rendered || 'no records'}, ${rr.latencyInMs}ms (error: ${rr.error ?? 'none'})`,
+          `- _${rr.resolver}_ — ${rendered || 'no records'}, ${rr.latencyInMs}ms (error: ${rr.queryError ?? 'none'})`,
         );
       }
       if (r.reverse && r.reverse.length > 0) {
         lines.push('**Reverse DNS:**');
         for (const rev of r.reverse) {
           lines.push(
-            `- ${rev.ip} → ${rev.hostnames.length > 0 ? rev.hostnames.join(', ') : 'no PTR'}${rev.error ? ` (error: ${rev.error})` : ''}`,
+            `- ${rev.ip} → ${rev.hostnames.length > 0 ? rev.hostnames.join(', ') : 'no PTR'}${rev.lookupError ? ` (error: ${rev.lookupError})` : ''}`,
           );
         }
       }

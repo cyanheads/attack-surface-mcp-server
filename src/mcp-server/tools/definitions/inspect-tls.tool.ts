@@ -52,7 +52,10 @@ const TlsResultSchema = z
       .array(z.string())
       .describe('Posture findings (expiry windows, weak protocol, self-signed, etc.).'),
     checkedAt: z.string().describe('ISO 8601 timestamp of the inspection.'),
-    error: z.string().nullable().describe('Connection/handshake error, or null on success.'),
+    handshakeError: z
+      .string()
+      .nullable()
+      .describe('Connection/handshake error, or null on success.'),
   })
   .describe('TLS/SSL posture for one host:port.');
 
@@ -102,7 +105,7 @@ export const inspectTlsTool = tool('attacksurface_inspect_tls', {
 
     const results = await getTlsService().inspectHosts(input.hosts, input.port, input.timeoutMs);
 
-    if (results.every((r) => r.error !== null)) {
+    if (results.every((r) => r.handshakeError !== null)) {
       ctx.enrich.notice(
         `No host completed a TLS handshake on port ${input.port}. The port may be closed or not running TLS.`,
       );
@@ -115,7 +118,7 @@ export const inspectTlsTool = tool('attacksurface_inspect_tls', {
     const lines: string[] = [];
     for (const r of result.results) {
       lines.push(`## ${r.host}:${r.port}`);
-      lines.push(`**Error:** ${r.error ?? 'none'}`);
+      lines.push(`**Error:** ${r.handshakeError ?? 'none'}`);
       lines.push(`**Protocol:** ${r.protocol ?? 'unknown'} | **Cipher:** ${r.cipher ?? 'unknown'}`);
       lines.push(
         `**Validation:** ${r.validationAuthorized ? 'trusted chain' : 'not trusted'} (${r.validationError ?? 'no error'}) | **Chain depth:** ${r.chainDepth}`,

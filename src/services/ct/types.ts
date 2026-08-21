@@ -10,12 +10,12 @@ export type CtSource = 'crt.sh' | 'certspotter' | 'tls-san';
 export interface CtSourceStatus {
   /** Count of names this source contributed (after scoping/dedup at the source level). */
   count: number;
-  /** Error message when the source failed, else null. */
-  error: string | null;
   /** Whether the source answered successfully. */
   ok: boolean;
   /** Source name. */
   source: CtSource;
+  /** Error message when the source failed, else null. */
+  sourceError: string | null;
 }
 
 /** A discovered subdomain with the source(s) that surfaced it. */

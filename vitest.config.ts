@@ -6,8 +6,9 @@
  *
  * @module vitest.config
  */
-import { defineConfig, mergeConfig } from 'vitest/config';
+
 import coreConfig from '@cyanheads/mcp-ts-core/vitest.config';
+import { defineConfig, mergeConfig } from 'vitest/config';
 
 const alias = { '@/': new URL('./src/', import.meta.url).pathname };
 
@@ -22,36 +23,38 @@ export default mergeConfig(
           test: {
             name: 'unit',
             include: ['src/**/*.test.ts', 'tests/**/*.test.ts'],
-            exclude: ['tests/smoke/**', 'tests/integration/**', 'tests/fuzz/**'],
+            exclude: [
+              'src/**/*.fuzz.test.ts',
+              'tests/smoke/**',
+              'tests/integration/**',
+              'tests/fuzz/**',
+            ],
           },
         },
-        // Add more projects as your suite grows. Each inherits the framework's
-        // base config (environment, pool, coverage) and can override freely.
-        //
-        // {
-        //   extends: true,
-        //   test: {
-        //     name: 'smoke',
-        //     include: ['tests/smoke/**/*.test.ts'],
-        //   },
-        // },
-        // {
-        //   extends: true,
-        //   test: {
-        //     name: 'fuzz',
-        //     include: ['tests/fuzz/**/*.test.ts'],
-        //     testTimeout: 15_000,
-        //   },
-        // },
-        // {
-        //   extends: true,
-        //   test: {
-        //     name: 'integration',
-        //     include: ['tests/integration/**/*.test.ts'],
-        //     maxWorkers: 1,
-        //     testTimeout: 30_000,
-        //   },
-        // },
+        {
+          extends: true,
+          test: {
+            name: 'smoke',
+            include: ['tests/smoke/**/*.test.ts'],
+          },
+        },
+        {
+          extends: true,
+          test: {
+            name: 'integration',
+            include: ['tests/integration/**/*.test.ts'],
+            maxWorkers: 1,
+            testTimeout: 30_000,
+          },
+        },
+        {
+          extends: true,
+          test: {
+            name: 'fuzz',
+            include: ['src/**/*.fuzz.test.ts', 'tests/fuzz/**/*.test.ts'],
+            testTimeout: 15_000,
+          },
+        },
       ],
     },
   }),

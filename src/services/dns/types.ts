@@ -11,10 +11,10 @@ export const ALL_RECORD_TYPES: DnsRecordType[] = ['A', 'AAAA', 'CNAME', 'MX', 'N
 
 /** One resolver's answer for one host across the requested record types. */
 export interface ResolverResult {
-  /** Resolver-level error message, or null when the query succeeded (NODATA/NXDOMAIN are not errors). */
-  error: string | null;
   /** Round-trip latency in milliseconds. */
   latencyInMs: number;
+  /** Resolver-level error message, or null when the query succeeded (NODATA/NXDOMAIN are not errors). */
+  queryError: string | null;
   /** Record values keyed by type; absent types omitted. */
   records: Partial<Record<DnsRecordType, string[]>>;
   /** Resolver IP queried. */
@@ -23,20 +23,20 @@ export interface ResolverResult {
 
 /** A reverse-DNS (PTR) lookup result for one IP. */
 export interface ReverseResult {
-  /** Error message, or null on success. */
-  error: string | null;
   /** PTR hostnames, or empty when none. */
   hostnames: string[];
   /** The IP that was reverse-resolved. */
   ip: string;
+  /** Error message, or null on success. */
+  lookupError: string | null;
 }
 
 /** Aggregate DNS result for a single host across all queried resolvers. */
 export interface HostDnsResult {
-  /** First host-level error (e.g. SSRF rejection), or null. */
-  error: string | null;
   /** The host queried. */
   host: string;
+  /** First host-level error (e.g. SSRF rejection), or null. */
+  hostError: string | null;
   /** Record types where resolvers disagreed. */
   propagationMismatches: DnsRecordType[];
   /** Merged records from the first resolver that answered (canonical view). */

@@ -167,7 +167,7 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
         return { domain, names: [], sourceStatuses: [] };
       });
     for (const s of ct.sourceStatuses) {
-      if (!s.ok) notes.push(`CT source ${s.source} failed: ${s.error}`);
+      if (!s.ok) notes.push(`CT source ${s.source} failed: ${s.sourceError}`);
     }
 
     // Always include the apex itself as a candidate.
@@ -360,7 +360,7 @@ async function enrichTls(hosts: LiveHost[]): Promise<void> {
   const byHost = new Map<string, TlsResult>(results.map((r) => [r.host, r]));
   for (const h of hosts) {
     const r = byHost.get(h.host);
-    if (!r || r.error) continue;
+    if (!r || r.handshakeError) continue;
     h.tls = {
       protocol: r.protocol,
       cipher: r.cipher,
@@ -381,7 +381,7 @@ async function enrichHttp(hosts: LiveHost[], ctx: Context): Promise<void> {
   );
   for (const h of hosts) {
     const r: HttpProbeResult | undefined = results.get(h.host);
-    if (!r || r.error) continue;
+    if (!r || r.transportError) continue;
     h.http = {
       finalStatus: r.finalStatus,
       finalUrl: r.finalUrl,

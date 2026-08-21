@@ -146,7 +146,7 @@ function inspectOne(
         validationError: null,
         findings: ['Connection timed out.'],
         checkedAt,
-        error: `TLS handshake timed out after ${timeoutMs}ms.`,
+        handshakeError: `TLS handshake timed out after ${timeoutMs}ms.`,
       });
     }, timeoutMs);
 
@@ -195,7 +195,7 @@ function inspectOne(
           validationError: authError ? String(authError) : null,
           findings,
           checkedAt,
-          error: null,
+          handshakeError: null,
         });
       },
     );
@@ -212,7 +212,7 @@ function inspectOne(
         validationError: null,
         findings: [`Connection error: ${err.message}`],
         checkedAt,
-        error: err.message,
+        handshakeError: err.message,
       });
     });
   });
@@ -245,7 +245,7 @@ export class TlsService {
             validationError: null,
             findings: [(r.reason as Error).message],
             checkedAt: new Date().toISOString(),
-            error: (r.reason as Error).message,
+            handshakeError: (r.reason as Error).message,
           },
     );
   }

@@ -65,8 +65,6 @@ export interface CookieAudit {
 export interface HttpProbeResult {
   /** ISO 8601 timestamp of the probe. */
   checkedAt: string;
-  /** Connection/transport error message, or null on success. */
-  error: string | null;
   /** Final HTTP status code. */
   finalStatus: number;
   /** Final URL after following redirects. */
@@ -79,6 +77,8 @@ export interface HttpProbeResult {
   securityAudit: SecurityHeaderAudit;
   /** Technology fingerprint detections, each with its triggering evidence. */
   technologies: TechDetection[];
+  /** Connection/transport error message, or null on success. */
+  transportError: string | null;
   /** URL probed (the initial request URL). */
   url: string;
 }

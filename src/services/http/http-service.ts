@@ -165,7 +165,7 @@ export class HttpService {
         securityAudit: auditSecurity({}, [], false, false),
         technologies: [],
         checkedAt,
-        error: err instanceof Error ? err.message : String(err),
+        transportError: err instanceof Error ? err.message : String(err),
       };
     }
 
@@ -179,7 +179,7 @@ export class HttpService {
         securityAudit: auditSecurity({}, [], false, false),
         technologies: [],
         checkedAt,
-        error: `Exceeded ${MAX_REDIRECTS} redirects without a final response.`,
+        transportError: `Exceeded ${MAX_REDIRECTS} redirects without a final response.`,
       };
     }
 
@@ -216,7 +216,7 @@ export class HttpService {
       securityAudit,
       technologies,
       checkedAt,
-      error: null,
+      transportError: null,
     };
   }
 

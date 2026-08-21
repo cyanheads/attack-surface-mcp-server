@@ -92,7 +92,7 @@ async function queryResolver(
     resolver: resolverIp,
     latencyInMs: Math.round(performance.now() - start),
     records,
-    error: firstError,
+    queryError: firstError,
   };
 }
 
@@ -139,7 +139,7 @@ export class DnsService {
             resolverResults: [],
             propagationMismatches: [],
             resolved: false,
-            error: (r.reason as Error).message,
+            hostError: (r.reason as Error).message,
           },
     );
   }
@@ -165,7 +165,7 @@ export class DnsService {
       reverseResults = await this.reverseLookup(ips, timeoutMs);
     }
 
-    const anyError = resolverResults.find((r) => r.error)?.error ?? null;
+    const anyError = resolverResults.find((r) => r.queryError)?.queryError ?? null;
 
     return {
       host,
@@ -174,7 +174,7 @@ export class DnsService {
       propagationMismatches: mismatches,
       ...(reverseResults ? { reverse: reverseResults } : {}),
       resolved,
-      error: anyError,
+      hostError: anyError,
     };
   }
 
@@ -185,14 +185,14 @@ export class DnsService {
       ips.map(async (ip) => {
         try {
           const hostnames = await resolver.reverse(ip);
-          return { ip, hostnames: hostnames.sort(), error: null };
+          return { ip, hostnames: hostnames.sort(), lookupError: null };
         } catch (err) {
           const code = (err as NodeJS.ErrnoException).code;
           // No PTR record is a normal answer, not an error.
           if (code === 'ENOTFOUND' || code === 'ENODATA') {
-            return { ip, hostnames: [], error: null };
+            return { ip, hostnames: [], lookupError: null };
           }
-          return { ip, hostnames: [], error: (err as Error).message };
+          return { ip, hostnames: [], lookupError: (err as Error).message };
         }
       }),
     );

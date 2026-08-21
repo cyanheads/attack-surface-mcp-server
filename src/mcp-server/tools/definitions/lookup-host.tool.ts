@@ -8,7 +8,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getShodanService } from '@/services/shodan/shodan-service.js';
 
 const ServiceBannerSchema = z
@@ -121,8 +121,7 @@ export const lookupHostTool = tool('attacksurface_lookup_host', {
       const host = await shodan.lookupHost(input.target, ctx);
       return { mode: 'host' as const, host };
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('404')) {
+      if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
         throw ctx.fail('no_data', `Shodan has no data for ${input.target}.`, {
           ...ctx.recoveryFor('no_data'),
         });

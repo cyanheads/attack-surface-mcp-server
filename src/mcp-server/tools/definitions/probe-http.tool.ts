@@ -96,7 +96,7 @@ export const probeHttpTool = tool('attacksurface_probe_http', {
     securityAudit: SecurityAuditSchema.describe('Security-header audit.'),
     technologies: z.array(TechDetectionSchema).describe('Technology detections with evidence.'),
     checkedAt: z.string().describe('ISO 8601 timestamp of the probe.'),
-    error: z.string().nullable().describe('Transport error, or null on success.'),
+    transportError: z.string().nullable().describe('Transport error, or null on success.'),
   }),
   enrichment: {
     notice: z.string().optional().describe('Guidance when the probe could not reach the target.'),
@@ -114,14 +114,16 @@ export const probeHttpTool = tool('attacksurface_probe_http', {
   async handler(input, ctx) {
     const result = await getHttpService().probe(input.url, input.userAgent, input.timeoutMs, ctx);
 
-    // The service surfaces SSRF rejections via its error field with an SSRF_BLOCKED prefix;
-    // promote that to the typed contract so the agent gets an actionable reason.
-    if (result.error?.startsWith('SSRF_BLOCKED')) {
-      throw ctx.fail('blocked_target', result.error, { ...ctx.recoveryFor('blocked_target') });
+    // The service surfaces SSRF rejections via its transportError field with an SSRF_BLOCKED
+    // prefix; promote that to the typed contract so the agent gets an actionable reason.
+    if (result.transportError?.startsWith('SSRF_BLOCKED')) {
+      throw ctx.fail('blocked_target', result.transportError, {
+        ...ctx.recoveryFor('blocked_target'),
+      });
     }
 
-    if (result.error) {
-      ctx.enrich.notice(`Could not complete the probe of ${input.url}: ${result.error}`);
+    if (result.transportError) {
+      ctx.enrich.notice(`Could not complete the probe of ${input.url}: ${result.transportError}`);
     }
 
     return result;
@@ -130,7 +132,7 @@ export const probeHttpTool = tool('attacksurface_probe_http', {
   format: (result) => {
     const lines: string[] = [];
     lines.push(`## ${result.url}`);
-    lines.push(`**Error:** ${result.error ?? 'none'}`);
+    lines.push(`**Error:** ${result.transportError ?? 'none'}`);
     lines.push(`**Final status:** ${result.finalStatus} | **Final URL:** ${result.finalUrl}`);
     lines.push('**Redirect chain:**');
     if (result.redirectChain.length === 0) lines.push('- (none)');

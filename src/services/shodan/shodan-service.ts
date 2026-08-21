@@ -9,9 +9,9 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { McpError, notFound } from '@cyanheads/mcp-ts-core/errors';
+import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
-import { toRequestContext } from '@/utils/request-context.js';
 import type {
   ShodanHostResult,
   ShodanSearchMatch,
@@ -67,7 +67,8 @@ export class ShodanService {
   async lookupHost(ip: string, ctx: Context): Promise<ShodanHostResult> {
     const key = this.requireKey();
     const url = `${BASE_URL}/shodan/host/${encodeURIComponent(ip)}?key=${encodeURIComponent(key)}`;
-    const raw = await this.fetchJson<RawShodanHost>(url, ctx, 'shodanService.lookupHost');
+    // An unscanned IP (404) is a normal answer for host intelligence, not a failure.
+    const raw = await this.fetchJson<RawShodanHost>(url, ctx, 'shodanService.lookupHost', [404]);
 
     const services: ShodanServiceBanner[] = (raw.data ?? []).map((d) => ({
       port: d.port ?? 0,
@@ -121,38 +122,61 @@ export class ShodanService {
     return this.config.shodanApiKey;
   }
 
-  private async fetchJson<T>(url: string, ctx: Context, operation: string): Promise<T> {
+  private async fetchJson<T>(
+    url: string,
+    ctx: Context,
+    operation: string,
+    expectedStatuses: number[] = [],
+  ): Promise<T> {
     return await withRetry(
       async () => {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-        const signal = ctx.signal
-          ? AbortSignal.any([controller.signal, ctx.signal])
-          : controller.signal;
         let res: Response;
         try {
-          res = await fetch(url, {
-            signal,
+          res = await fetchWithTimeout(url, TIMEOUT_MS, ctx, {
             headers: { accept: 'application/json', 'user-agent': this.config.httpUserAgent },
+            expectedStatuses,
+            signal: ctx.signal,
           });
-        } finally {
-          clearTimeout(timer);
+        } catch (err) {
+          throw translateUpstreamError(err);
         }
-        if (res.status === 401) throw new Error('Shodan rejected the API key (HTTP 401).');
-        if (res.status === 404)
-          throw new Error('Shodan has no information for this target (HTTP 404).');
-        if (res.status === 429) throw new Error('Shodan rate limit / no query credits (HTTP 429).');
-        if (!res.ok) throw new Error(`Shodan returned HTTP ${res.status}`);
         return (await res.json()) as T;
       },
       {
         operation,
-        context: toRequestContext(ctx, operation),
+        context: ctx,
         baseDelayMs: 1500,
         maxRetries: 2,
         signal: ctx.signal,
       },
     );
+  }
+}
+
+/** Extract the HTTP status from a `fetchWithTimeout` status-mapped error, else undefined. */
+function upstreamStatus(err: unknown): number | undefined {
+  if (err instanceof McpError && typeof err.data?.status === 'number') return err.data.status;
+  return undefined;
+}
+
+/**
+ * Re-label a status-mapped fetch error with Shodan's domain vocabulary; pass anything else
+ * through unchanged. 429 keeps its code and `data.retryAfter` so retries honor Retry-After.
+ */
+function translateUpstreamError(err: unknown): unknown {
+  switch (upstreamStatus(err)) {
+    case 401:
+      return new Error('Shodan rejected the API key (HTTP 401).', { cause: err });
+    case 404:
+      // An unscanned target is an expected outcome (the tool degrades to typed `no_data`),
+      // so it logs at debug and fails fast instead of burning retries.
+      return notFound('Shodan has no information for this target.');
+    case 429:
+      return err instanceof McpError
+        ? new McpError(err.code, 'Shodan rate limit / no query credits (HTTP 429).', err.data)
+        : err;
+    default:
+      return err;
   }
 }
 

@@ -106,7 +106,7 @@ export const surfaceResource = resource('attacksurface://surface/{domain}', {
         host,
         addresses: liveness.get(host) ?? [],
         tls:
-          tlsR && !tlsR.error
+          tlsR && !tlsR.handshakeError
             ? {
                 protocol: tlsR.protocol,
                 daysUntilExpiry: tlsR.certificate?.daysUntilExpiry ?? null,
@@ -115,7 +115,7 @@ export const surfaceResource = resource('attacksurface://surface/{domain}', {
               }
             : null,
         http:
-          httpR && !httpR.error
+          httpR && !httpR.transportError
             ? {
                 finalStatus: httpR.finalStatus,
                 securityFindings: httpR.securityAudit.findings,

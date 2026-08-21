@@ -31,7 +31,7 @@ const SourceStatusSchema = z
     source: SourceEnum.describe('CT source.'),
     ok: z.boolean().describe('Whether the source answered successfully.'),
     count: z.number().describe('Distinct names this source contributed.'),
-    error: z.string().nullable().describe('Source error, or null on success.'),
+    sourceError: z.string().nullable().describe('Source error, or null on success.'),
   })
   .describe('Per-source outcome for the enumeration.');
 
@@ -138,7 +138,7 @@ export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains'
     if (ct.sourceStatuses.length > 0 && ct.sourceStatuses.every((s) => !s.ok)) {
       throw ctx.fail(
         'all_sources_failed',
-        `All CT sources failed: ${ct.sourceStatuses.map((s) => `${s.source} (${s.error})`).join('; ')}`,
+        `All CT sources failed: ${ct.sourceStatuses.map((s) => `${s.source} (${s.sourceError})`).join('; ')}`,
         { ...ctx.recoveryFor('all_sources_failed') },
       );
     }
@@ -171,7 +171,7 @@ export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains'
     lines.push(`## Subdomains for ${result.domain}`);
     lines.push('**Sources:**');
     for (const s of result.sourceStatuses) {
-      lines.push(`- ${s.source}: ok=${s.ok}, count=${s.count}, error=${s.error ?? 'none'}`);
+      lines.push(`- ${s.source}: ok=${s.ok}, count=${s.count}, error=${s.sourceError ?? 'none'}`);
     }
     lines.push(`\n**${result.subdomains.length} name(s):**`);
     for (const s of result.subdomains) {

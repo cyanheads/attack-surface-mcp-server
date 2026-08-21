@@ -10,9 +10,9 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { McpError } from '@cyanheads/mcp-ts-core/errors';
+import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
-import { toRequestContext } from '@/utils/request-context.js';
 import type { CtEnumerationResult, CtSource, CtSourceStatus, DiscoveredName } from './types.js';
 
 const CRTSH_TIMEOUT_MS = 20_000;
@@ -72,13 +72,13 @@ export class CtService {
       try {
         const names = await this.fetchCrtSh(apex, ctx);
         const count = record(names, 'crt.sh');
-        sourceStatuses.push({ source: 'crt.sh', ok: true, count, error: null });
+        sourceStatuses.push({ source: 'crt.sh', ok: true, count, sourceError: null });
       } catch (err) {
         sourceStatuses.push({
           source: 'crt.sh',
           ok: false,
           count: 0,
-          error: err instanceof Error ? err.message : String(err),
+          sourceError: err instanceof Error ? err.message : String(err),
         });
       }
     }
@@ -88,13 +88,13 @@ export class CtService {
       try {
         const names = await this.fetchCertspotter(apex, ctx);
         const count = record(names, 'certspotter');
-        sourceStatuses.push({ source: 'certspotter', ok: true, count, error: null });
+        sourceStatuses.push({ source: 'certspotter', ok: true, count, sourceError: null });
       } catch (err) {
         sourceStatuses.push({
           source: 'certspotter',
           ok: false,
           count: 0,
-          error: err instanceof Error ? err.message : String(err),
+          sourceError: err instanceof Error ? err.message : String(err),
         });
       }
     }
@@ -102,7 +102,7 @@ export class CtService {
     // TLS-SAN (caller-supplied, always "ok" — it's already-resolved data)
     if (sources.includes('tls-san') && extraSanNames.length > 0) {
       const count = record(extraSanNames, 'tls-san');
-      sourceStatuses.push({ source: 'tls-san', ok: true, count, error: null });
+      sourceStatuses.push({ source: 'tls-san', ok: true, count, sourceError: null });
     }
 
     const names: DiscoveredName[] = [...byName.entries()]
@@ -117,23 +117,13 @@ export class CtService {
     const url = `https://crt.sh/?q=${encodeURIComponent(`%.${domain}`)}&output=json`;
     return await withRetry(
       async () => {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), CRTSH_TIMEOUT_MS);
-        const signal = ctx.signal
-          ? AbortSignal.any([controller.signal, ctx.signal])
-          : controller.signal;
-        let res: Response;
-        try {
-          res = await fetch(url, {
-            signal,
-            headers: { accept: 'application/json', 'user-agent': this.config.httpUserAgent },
-          });
-        } finally {
-          clearTimeout(timer);
-        }
-        if (!res.ok) {
-          throw new Error(`crt.sh returned HTTP ${res.status}`);
-        }
+        // Overload responses (5xx) are the documented norm for crt.sh and the reason the
+        // Certspotter/TLS-SAN fallbacks exist — log them at debug, not error.
+        const res = await fetchWithTimeout(url, CRTSH_TIMEOUT_MS, ctx, {
+          headers: { accept: 'application/json', 'user-agent': this.config.httpUserAgent },
+          expectedStatuses: [502, 503, 504],
+          signal: ctx.signal,
+        });
         const text = await res.text();
         // crt.sh occasionally returns an HTML error page with a 200 — detect and treat as transient.
         if (/^\s*<(?:!doctype\s+html|html[\s>])/i.test(text)) {
@@ -144,7 +134,7 @@ export class CtService {
       },
       {
         operation: 'ctService.fetchCrtSh',
-        context: toRequestContext(ctx, 'ctService.fetchCrtSh'),
+        context: ctx,
         baseDelayMs: 1500,
         maxRetries: 2,
         signal: ctx.signal,
@@ -169,29 +159,33 @@ export class CtService {
     }
     return await withRetry(
       async () => {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), CERTSPOTTER_TIMEOUT_MS);
-        const signal = ctx.signal
-          ? AbortSignal.any([controller.signal, ctx.signal])
-          : controller.signal;
+        // Free-tier rate limiting (429) is the documented norm without a key and the reason the
+        // CERTSPOTTER_API_KEY exists — log it at debug, not error.
         let res: Response;
         try {
-          res = await fetch(url, { signal, headers });
-        } finally {
-          clearTimeout(timer);
-        }
-        if (res.status === 429) {
-          throw new Error('Certspotter rate limit hit (set CERTSPOTTER_API_KEY to raise it).');
-        }
-        if (!res.ok) {
-          throw new Error(`Certspotter returned HTTP ${res.status}`);
+          res = await fetchWithTimeout(url, CERTSPOTTER_TIMEOUT_MS, ctx, {
+            headers,
+            expectedStatuses: [429],
+            signal: ctx.signal,
+          });
+        } catch (err) {
+          // Re-label with remediation text; keep the code and `data.retryAfter` so retries
+          // still honor Retry-After.
+          if (err instanceof McpError && err.data?.status === 429) {
+            throw new McpError(
+              err.code,
+              'Certspotter rate limit hit (set CERTSPOTTER_API_KEY to raise it).',
+              err.data,
+            );
+          }
+          throw err;
         }
         const records = (await res.json()) as CtRecord[];
         return records.flatMap((r) => r.dns_names ?? []);
       },
       {
         operation: 'ctService.fetchCertspotter',
-        context: toRequestContext(ctx, 'ctService.fetchCertspotter'),
+        context: ctx,
         baseDelayMs: 2000,
         maxRetries: 2,
         signal: ctx.signal,

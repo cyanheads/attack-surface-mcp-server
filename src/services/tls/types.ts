@@ -37,10 +37,10 @@ export interface TlsResult {
   checkedAt: string;
   /** Negotiated cipher suite (IANA standard name preferred), or null. */
   cipher: string | null;
-  /** Connection/handshake error message, or null on success. */
-  error: string | null;
   /** Observed posture findings (expiry windows, weak protocol, self-signed, etc.). */
   findings: string[];
+  /** Connection/handshake error message, or null on success. */
+  handshakeError: string | null;
   /** Host inspected. */
   host: string;
   /** Port inspected. */
