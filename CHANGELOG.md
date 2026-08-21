@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-08-21 · ⚠️ Breaking
+
+Reclassifies 0.1.2's per-target `error` field renames as the breaking change they are; no source change ships in 0.2.0, only the corrected version and migration guidance.
+
 ## [0.1.2](changelog/0.1.x/0.1.2.md) — 2026-08-21
 
 Maintenance release on mcp-ts-core ^0.12.3: framework fetch/retry layer for upstream calls, per-item error fields renamed across tool outputs, typed no_data for unscanned Shodan hosts, reconciled unit/integration/smoke/fuzz suites, install-time supply-chain guards.

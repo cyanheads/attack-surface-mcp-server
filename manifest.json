@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "attack-surface-mcp-server",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Passive external attack-surface mapping: CT subdomains, DNS, TLS, HTTP posture, RDAP/WHOIS, Shodan via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "Casey Hand",
