@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-08-30
+
+Hardens RDAP redirects, preserves CIDR registration lookups, and fixes WHOIS field parsing.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-08-21 · ⚠️ Breaking
 
 Reclassifies 0.1.2's per-target `error` field renames as the breaking change they are; no source change ships in 0.2.0, only the corrected version and migration guidance.

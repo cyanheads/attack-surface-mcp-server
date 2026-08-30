@@ -1,6 +1,6 @@
 # attack-surface-mcp-server - Directory Structure
 
-Generated on: 2026-08-21 15:03:56
+Generated on: 2026-08-30 21:34:40
 
 ```text
 attack-surface-mcp-server/
@@ -23,6 +23,7 @@ attack-surface-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -174,7 +175,6 @@ attack-surface-mcp-server/
 │   │       ├── tls-service.ts
 │   │       └── types.ts
 │   ├── utils/
-│   │   ├── request-context.ts
 │   │   ├── ssrf-guard.test.ts
 │   │   ├── ssrf-guard.ts
 │   │   ├── validation.test.ts
