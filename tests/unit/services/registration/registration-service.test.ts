@@ -18,10 +18,19 @@ const netBoundary = vi.hoisted(() => ({
   createConnection: vi.fn(),
   scenarios: [] as WhoisScenario[],
 }));
+const ssrfBoundary = vi.hoisted(() => ({
+  assertSafeUrl: vi.fn<(rawUrl: string, signal?: AbortSignal) => Promise<void>>(),
+}));
 
 vi.mock('node:net', async () => {
   const actual = await vi.importActual<typeof import('node:net')>('node:net');
   return { ...actual, createConnection: netBoundary.createConnection };
+});
+
+vi.mock('@/utils/ssrf-guard.js', async () => {
+  const actual =
+    await vi.importActual<typeof import('@/utils/ssrf-guard.js')>('@/utils/ssrf-guard.js');
+  return { ...actual, assertSafeUrl: ssrfBoundary.assertSafeUrl };
 });
 
 import {
@@ -60,6 +69,26 @@ class FakeWhoisSocket extends EventEmitter {
   }
 }
 
+function delayedResponse(
+  response: Response,
+  delayMs: number,
+  signal: AbortSignal | null | undefined,
+): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException('The operation was aborted.', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve(response);
+    }, delayMs);
+
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 describe('classifyTarget', () => {
   it('classifies IPv4 and IPv6 literals as ip', () => {
     expect(classifyTarget('8.8.8.8')).toBe('ip');
@@ -84,6 +113,8 @@ describe('RegistrationService', () => {
     vi.stubEnv('ATTACKSURFACE_ALLOW_PRIVATE_TARGETS', 'true');
     fetchMock.mockReset();
     vi.stubGlobal('fetch', fetchMock);
+    ssrfBoundary.assertSafeUrl.mockReset();
+    ssrfBoundary.assertSafeUrl.mockResolvedValue();
     netBoundary.createConnection.mockReset();
     netBoundary.scenarios.length = 0;
     netBoundary.createConnection.mockImplementation(() => {
@@ -200,6 +231,106 @@ describe('RegistrationService', () => {
     );
   });
 
+  it('gives an authoritative RDAP redirect target a fresh timeout', async () => {
+    vi.useFakeTimers();
+    fetchMock
+      .mockImplementationOnce((_input, init) =>
+        delayedResponse(
+          new Response(null, {
+            status: 302,
+            headers: { location: '/authoritative/example.com' },
+          }),
+          4_000,
+          init?.signal,
+        ),
+      )
+      .mockImplementationOnce((_input, init) =>
+        delayedResponse(Response.json({ status: ['active'] }), 2_000, init?.signal),
+      );
+    netBoundary.scenarios.push({
+      mode: 'success',
+      chunks: ['Registrar: WHOIS fallback\n'],
+    });
+
+    const pending = new RegistrationService(config).lookup(
+      'example.com',
+      'domain',
+      createMockContext(),
+    );
+    await vi.advanceTimersByTimeAsync(6_000);
+
+    await expect(pending).resolves.toMatchObject({ source: 'rdap' });
+  });
+
+  it('bounds an unresponsive RDAP hop before falling back to WHOIS', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockImplementation((_input, init) =>
+      delayedResponse(Response.json({}), 60_000, init?.signal),
+    );
+    netBoundary.scenarios.push({
+      mode: 'success',
+      chunks: ['Registrar: WHOIS fallback\n'],
+    });
+
+    const pending = new RegistrationService(config).lookup(
+      'example.com',
+      'domain',
+      createMockContext(),
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await expect(pending).resolves.toMatchObject({
+      source: 'whois',
+      notes: [expect.stringContaining('fell back to WHOIS')],
+    });
+  });
+
+  it('includes SSRF validation in the per-hop RDAP timeout', async () => {
+    vi.useFakeTimers();
+    ssrfBoundary.assertSafeUrl.mockImplementation((_url, signal) =>
+      delayedResponse(Response.json({}), 6_000, signal).then(() => undefined),
+    );
+    fetchMock.mockResolvedValue(Response.json({ status: ['active'] }));
+    netBoundary.scenarios.push({
+      mode: 'success',
+      chunks: ['Registrar: WHOIS fallback\n'],
+    });
+
+    const pending = new RegistrationService(config).lookup(
+      'example.com',
+      'domain',
+      createMockContext(),
+    );
+    await vi.advanceTimersByTimeAsync(6_000);
+
+    await expect(pending).resolves.toMatchObject({ source: 'whois' });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(ssrfBoundary.assertSafeUrl).toHaveBeenCalledWith(
+      'https://rdap.example.test/domain/example.com',
+      expect.any(AbortSignal),
+    );
+  });
+
+  it('propagates caller cancellation without starting WHOIS', async () => {
+    const controller = new AbortController();
+    let rdapSignal: AbortSignal | null | undefined;
+    fetchMock.mockImplementation((_input, init) => {
+      rdapSignal = init?.signal;
+      return delayedResponse(Response.json({}), 60_000, init?.signal);
+    });
+    const pending = new RegistrationService(config).lookup(
+      'example.com',
+      'domain',
+      createMockContext({ signal: controller.signal }),
+    );
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(rdapSignal?.aborted).toBe(true);
+    expect(netBoundary.createConnection).not.toHaveBeenCalled();
+  });
+
   it('falls back to authoritative WHOIS and parses domain fields', async () => {
     fetchMock.mockRejectedValue(new Error('RDAP offline'));
     netBoundary.scenarios.push(
@@ -271,6 +402,72 @@ describe('RegistrationService', () => {
       country: 'US',
       statuses: [],
       events: [],
+    });
+  });
+
+  it('does not let whitespace-only IP WHOIS fields consume later CRLF records', async () => {
+    fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
+    netBoundary.scenarios.push({
+      mode: 'success',
+      chunks: [
+        'NetName: \t \r\nNetName: EXAMPLE-NET\r\n',
+        'CIDR: \t \r\nCIDR: 192.0.2.0/24\r\n',
+        'OriginAS: \t \r\nOriginAS: AS1\r\n',
+        'Country: \t \r\nCountry: AA\r\n',
+      ],
+    });
+
+    const result = await new RegistrationService(config).lookup(
+      '192.0.2.1',
+      'ip',
+      createMockContext(),
+    );
+
+    expect(result.registration).toEqual({
+      kind: 'ip',
+      target: '192.0.2.1',
+      networkName: 'EXAMPLE-NET',
+      cidrs: ['192.0.2.0/24'],
+      originAsns: [1],
+      country: 'AA',
+      statuses: [],
+      events: [],
+    });
+  });
+
+  it('does not let whitespace-only domain WHOIS fields consume later CRLF records', async () => {
+    fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
+    netBoundary.scenarios.push({
+      mode: 'success',
+      chunks: [
+        'Registrar: \t \r\nRegistrar: Example Registrar\r\n',
+        'Domain Status: \t \r\nDomain Status: active\r\n',
+        'Creation Date: \t \r\nCreation Date: 1995-08-14T04:00:00Z\r\n',
+        'Registry Expiry Date: \t \r\nRegistry Expiry Date: 2030-08-13T04:00:00Z\r\n',
+        'Updated Date: \t \r\nUpdated Date: 2025-01-01T00:00:00Z\r\n',
+        'Name Server: \t \r\nName Server: NS1.EXAMPLE.COM\r\n',
+        'DNSSEC: \t \r\nDNSSEC: signedDelegation\r\n',
+      ],
+    });
+
+    const result = await new RegistrationService(config).lookup(
+      'example.com',
+      'domain',
+      createMockContext(),
+    );
+
+    expect(result.registration).toEqual({
+      kind: 'domain',
+      target: 'example.com',
+      registrar: 'Example Registrar',
+      statuses: ['active'],
+      events: [
+        { action: 'registration', date: '1995-08-14T04:00:00Z' },
+        { action: 'expiration', date: '2030-08-13T04:00:00Z' },
+        { action: 'last changed', date: '2025-01-01T00:00:00Z' },
+      ],
+      nameservers: ['ns1.example.com'],
+      dnssecSigned: true,
     });
   });
 

@@ -9,7 +9,10 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getRegistrationService } from '@/services/registration/registration-service.js';
+import {
+  classifyTarget,
+  getRegistrationService,
+} from '@/services/registration/registration-service.js';
 import { isValidRegistrationTarget, normalizeDomain } from '@/utils/validation.js';
 
 const EventSchema = z
@@ -86,9 +89,11 @@ export const lookupRegistrationTool = tool('attacksurface_lookup_registration', 
   ],
 
   async handler(input, ctx) {
-    const normalized = input.type === 'ip' ? input.target.trim() : normalizeDomain(input.target);
+    const trimmed = input.target.trim();
     const target =
-      input.type === 'domain' || input.type === 'auto' ? normalized : input.target.trim();
+      input.type === 'domain' || (input.type === 'auto' && classifyTarget(trimmed) === 'domain')
+        ? normalizeDomain(trimmed)
+        : trimmed;
 
     if (!isValidRegistrationTarget(target)) {
       throw ctx.fail('invalid_target', `"${input.target}" is not a valid domain, IP, or CIDR.`, {

@@ -5,7 +5,12 @@
  * @module utils/ssrf-guard.test
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const dnsBoundary = vi.hoisted(() => ({ lookup: vi.fn() }));
+
+vi.mock('node:dns/promises', () => ({ lookup: dnsBoundary.lookup }));
+
 import {
   assertSafeDomain,
   assertSafeResolverIp,
@@ -13,8 +18,14 @@ import {
   resolveSafeHost,
 } from './ssrf-guard.js';
 
+beforeEach(() => {
+  vi.useRealTimers();
+  dnsBoundary.lookup.mockReset();
+});
+
 afterEach(() => {
   delete process.env.ATTACKSURFACE_ALLOW_PRIVATE_TARGETS;
+  vi.useRealTimers();
 });
 
 describe('assertSafeResolverIp', () => {
@@ -109,6 +120,24 @@ describe('assertSafeUrl', () => {
 
   it('accepts a public https URL', async () => {
     await expect(assertSafeUrl('https://8.8.8.8/')).resolves.toBeUndefined();
+  });
+
+  it('honors cancellation while hostname validation is waiting on DNS', async () => {
+    vi.useFakeTimers();
+    dnsBoundary.lookup.mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve([{ address: '8.8.8.8', family: 4 }]), 60_000),
+        ),
+    );
+    const controller = new AbortController();
+
+    const pending = assertSafeUrl('https://rdap.example.test/', controller.signal);
+    const rejection = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    controller.abort();
+    await vi.runAllTimersAsync();
+
+    await rejection;
   });
 });
 

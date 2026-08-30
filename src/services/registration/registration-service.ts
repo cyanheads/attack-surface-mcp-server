@@ -2,9 +2,10 @@
  * @fileoverview Registration/ownership service — RDAP (structured JSON) with a WHOIS (port-43 text)
  * fallback. RDAP runs over the `rdap.org` bootstrap, which 302-redirects to the authoritative
  * registry; the client MUST follow redirects (verified: 8.8.8.8 → rdap.arin.net within ~1s). IP
- * lookups via rdap.org are reliable; domain lookups can hang, so a strict 5s per-request deadline
- * falls back to WHOIS rather than waiting. Every RDAP field is treated as optional (sparse/redacted
- * data is the norm — `country` came back null for ARIN netblocks during design verification).
+ * lookups via rdap.org are reliable; domain lookups can hang, so each bootstrap or authoritative
+ * hop — SSRF validation and request together — gets a strict 5s timeout before the lookup falls
+ * back to WHOIS. Every RDAP field is treated as optional (sparse/redacted data is the norm —
+ * `country` came back null for ARIN netblocks during design verification).
  * @module services/registration/registration-service
  */
 
@@ -22,7 +23,7 @@ import type {
   RegistrationResult,
 } from './types.js';
 
-const RDAP_DEADLINE_MS = 5000;
+const RDAP_HOP_TIMEOUT_MS = 5000;
 const WHOIS_DEADLINE_MS = 8000;
 const WHOIS_IANA = 'whois.iana.org';
 const WHOIS_PORT = 43;
@@ -139,6 +140,7 @@ export class RegistrationService {
         kind === 'ip' ? parseIpRdap(target, data) : parseDomainRdap(target, data);
       return { source: 'rdap', registration, rawWhois: null, notes };
     } catch (err) {
+      if (ctx.signal?.aborted) throw err;
       const msg = err instanceof Error ? err.message : String(err);
       notes.push(`RDAP lookup failed (${msg}); fell back to WHOIS.`);
     }
@@ -151,8 +153,9 @@ export class RegistrationService {
   }
 
   /**
-   * Fetch RDAP via the rdap.org bootstrap, following its 302 to the authoritative registry under a
-   * strict deadline. Redirects are followed *manually* with `redirect: 'manual'` so every hop —
+   * Fetch RDAP via the rdap.org bootstrap, following its 302 to the authoritative registry. Each hop
+   * gets a fresh strict timeout covering both SSRF validation and the request, while the redirect cap
+   * bounds the full chain. Redirects are followed *manually* with `redirect: 'manual'` so every hop —
    * including registry-controlled `Location` targets — passes the SSRF guard before connecting; a
    * compromised or malicious bootstrap/registry cannot redirect the probe at an internal address.
    */
@@ -166,17 +169,16 @@ export class RegistrationService {
       kind === 'ip' ? `ip/${encodeURIComponent(target)}` : `domain/${encodeURIComponent(target)}`;
     let url = `${base}/${path}`;
 
-    // One deadline across the whole redirect chain.
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), RDAP_DEADLINE_MS);
-    const signal = ctx.signal
-      ? AbortSignal.any([controller.signal, ctx.signal])
-      : controller.signal;
+    for (let hop = 0; hop <= MAX_RDAP_REDIRECTS; hop++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), RDAP_HOP_TIMEOUT_MS);
+      const signal = ctx.signal
+        ? AbortSignal.any([controller.signal, ctx.signal])
+        : controller.signal;
 
-    try {
-      for (let hop = 0; hop <= MAX_RDAP_REDIRECTS; hop++) {
+      try {
         // SSRF guard on every hop target (also enforces http/https scheme).
-        await assertSafeUrl(url);
+        await assertSafeUrl(url, signal);
 
         const res = await fetch(url, {
           signal,
@@ -200,12 +202,12 @@ export class RegistrationService {
         if (res.status === 404) throw new Error('RDAP: target not found in any registry.');
         if (!res.ok) throw new Error(`RDAP returned HTTP ${res.status}`);
         return (await res.json()) as RdapResponse;
+      } finally {
+        clearTimeout(timer);
       }
-      // Unreachable — the loop returns or throws.
-      throw new Error('RDAP: redirect handling fell through.');
-    } finally {
-      clearTimeout(timer);
     }
+    // Unreachable — the loop returns or throws.
+    throw new Error('RDAP: redirect handling fell through.');
   }
 
   /**
@@ -234,7 +236,9 @@ export class RegistrationService {
    * DNS answer) cannot point the port-43 connection at an internal host.
    */
   private async whoisQuery(server: string, query: string, ctx: Context): Promise<string> {
+    ctx.signal?.throwIfAborted();
     const connectHost = (await resolveSafeHost(server)) ?? server;
+    ctx.signal?.throwIfAborted();
     return new Promise((resolve, reject) => {
       let data = '';
       let settled = false;
@@ -269,25 +273,32 @@ export class RegistrationService {
 
   /** Best-effort parse of WHOIS domain text into the structured shape. */
   private parseWhoisDomain(target: string, text: string): DomainRegistration {
-    const statuses = [...text.matchAll(/^\s*(?:Domain Status|status):\s*(.+)$/gim)]
+    const statuses = [...text.matchAll(/^[ \t]*(?:Domain Status|status):[ \t]*(\S[^\r\n]*)$/gim)]
       .map((m) => (m[1] ?? '').trim().split(/\s+/)[0] ?? '')
       .filter(Boolean);
     const events: RegistrationEvent[] = [];
-    const created = /^\s*(?:Creation Date|created|Registered on):\s*(.+)$/im
+    const created = /^[ \t]*(?:Creation Date|created|Registered on):[ \t]*(\S[^\r\n]*)$/im
       .exec(text)?.[1]
       ?.trim();
-    const expiry = /^\s*(?:Registry Expiry Date|Expiry date|paid-till|Expiration Date):\s*(.+)$/im
+    const expiry =
+      /^[ \t]*(?:Registry Expiry Date|Expiry date|paid-till|Expiration Date):[ \t]*(\S[^\r\n]*)$/im
+        .exec(text)?.[1]
+        ?.trim();
+    const updated = /^[ \t]*(?:Updated Date|last-update|changed):[ \t]*(\S[^\r\n]*)$/im
       .exec(text)?.[1]
       ?.trim();
-    const updated = /^\s*(?:Updated Date|last-update|changed):\s*(.+)$/im.exec(text)?.[1]?.trim();
     if (created) events.push({ action: 'registration', date: created });
     if (expiry) events.push({ action: 'expiration', date: expiry });
     if (updated) events.push({ action: 'last changed', date: updated });
-    const registrar = /^\s*(?:Registrar|registrar):\s*(.+)$/im.exec(text)?.[1]?.trim();
-    const nameservers = [...text.matchAll(/^\s*(?:Name Server|nserver|nameserver):\s*(\S+)/gim)]
+    const registrar = /^[ \t]*(?:Registrar|registrar):[ \t]*(\S[^\r\n]*)$/im
+      .exec(text)?.[1]
+      ?.trim();
+    const nameservers = [
+      ...text.matchAll(/^[ \t]*(?:Name Server|nserver|nameserver):[ \t]*(\S+)/gim),
+    ]
       .map((m) => (m[1] ?? '').toLowerCase())
       .filter(Boolean);
-    const dnssec = /^\s*DNSSEC:\s*(.+)$/im.exec(text)?.[1]?.trim().toLowerCase();
+    const dnssec = /^[ \t]*DNSSEC:[ \t]*(\S[^\r\n]*)$/im.exec(text)?.[1]?.trim().toLowerCase();
 
     return {
       kind: 'domain',
@@ -304,16 +315,18 @@ export class RegistrationService {
 
   /** Best-effort parse of WHOIS IP text into the structured shape. */
   private parseWhoisIp(target: string, text: string): IpRegistration {
-    const networkName = /^\s*(?:NetName|netname|network:Network-Name):\s*(.+)$/im
+    const networkName = /^[ \t]*(?:NetName|netname|network:Network-Name):[ \t]*(\S[^\r\n]*)$/im
       .exec(text)?.[1]
       ?.trim();
-    const cidrMatches = [...text.matchAll(/^\s*(?:CIDR|inetnum|route):\s*(.+)$/gim)]
+    const cidrMatches = [...text.matchAll(/^[ \t]*(?:CIDR|inetnum|route):[ \t]*(\S[^\r\n]*)$/gim)]
       .map((m) => (m[1] ?? '').trim())
       .filter(Boolean);
-    const asnMatches = [...text.matchAll(/^\s*(?:OriginAS|origin):\s*AS?(\d+)/gim)]
+    const asnMatches = [...text.matchAll(/^[ \t]*(?:OriginAS|origin):[ \t]*AS?(\d+)/gim)]
       .map((m) => Number.parseInt(m[1] ?? '', 10))
       .filter((n) => Number.isFinite(n));
-    const country = /^\s*(?:Country|country):\s*([A-Za-z]{2})\b/im.exec(text)?.[1]?.toUpperCase();
+    const country = /^[ \t]*(?:Country|country):[ \t]*([A-Za-z]{2})\b/im
+      .exec(text)?.[1]
+      ?.toUpperCase();
 
     return {
       kind: 'ip',

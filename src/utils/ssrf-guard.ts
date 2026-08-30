@@ -8,8 +8,8 @@
  *  - `assertSafeDomain(domain)` — bare host inputs (assert-only)
  *  - `resolveSafeHost(host)`    — assert + return a validated IP to *pin* the connection to,
  *                                 closing the DNS-rebinding window between check and connect
- *  - `assertSafeUrl(rawUrl)`    — URL inputs (HTTP probe / RDAP redirect hops); also enforces
- *                                 the http/https scheme. Re-call on every redirect hop.
+ *  - `assertSafeUrl(rawUrl, signal?)` — URL inputs (HTTP probe / RDAP redirect hops); also enforces
+ *                                       the http/https scheme. Re-call on every redirect hop.
  *  - `assertSafeResolverIp(ip)` — resolver IP validation (direct IP, no DNS lookup)
  *
  * **DNS-rebinding (TOCTOU) note.** An assert-then-connect-by-name pattern re-resolves the hostname
@@ -140,7 +140,12 @@ function checkIp(ip: string): string | null {
  * between this check and the connect. Returns an empty array when the input was a literal IP (the
  * caller already holds it) or when DNS resolution failed (let the connect fail naturally).
  */
-async function resolveAndCheck(hostname: string, context: string): Promise<string[]> {
+async function resolveAndCheck(
+  hostname: string,
+  context: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  signal?.throwIfAborted();
   const stripped = hostname.replace(/^\[/, '').replace(/\]$/, '');
 
   // Literal IP target — check directly without a DNS round-trip.
@@ -155,12 +160,26 @@ async function resolveAndCheck(hostname: string, context: string): Promise<strin
   // If it parsed as any IP literal (public), no DNS lookup is needed.
   if (/^\d+\.\d+\.\d+\.\d+$/.test(stripped) || stripped.includes(':')) return [];
 
+  let abortListener: (() => void) | undefined;
   let addresses: import('node:dns').LookupAddress[];
   try {
-    addresses = await lookup(hostname, { all: true });
+    const resolution = lookup(hostname, { all: true });
+    addresses = signal
+      ? await Promise.race([
+          resolution,
+          new Promise<never>((_resolve, reject) => {
+            abortListener = () => reject(signal.reason);
+            signal.addEventListener('abort', abortListener, { once: true });
+            if (signal.aborted) abortListener();
+          }),
+        ])
+      : await resolution;
   } catch {
+    signal?.throwIfAborted();
     // DNS failure is not a security issue — let the downstream fetch/connect fail naturally.
     return [];
+  } finally {
+    if (abortListener) signal?.removeEventListener('abort', abortListener);
   }
 
   for (const { address } of addresses) {
@@ -183,10 +202,12 @@ function privateTargetsAllowed(): boolean {
 
 /**
  * Assert that a raw URL is safe to fetch. Enforces http/https scheme and rejects hostnames that
- * resolve to a non-public address. Throws with an `SSRF_BLOCKED` prefix on rejection.
+ * resolve to a non-public address. Throws with an `SSRF_BLOCKED` prefix on rejection and accepts an
+ * optional signal so callers can include DNS validation in their request budget.
  * No-ops when `ATTACKSURFACE_ALLOW_PRIVATE_TARGETS=true`.
  */
-export async function assertSafeUrl(rawUrl: string): Promise<void> {
+export async function assertSafeUrl(rawUrl: string, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
@@ -202,7 +223,7 @@ export async function assertSafeUrl(rawUrl: string): Promise<void> {
   }
 
   if (privateTargetsAllowed()) return;
-  await resolveAndCheck(parsed.hostname, `URL "${rawUrl}"`);
+  await resolveAndCheck(parsed.hostname, `URL "${rawUrl}"`, signal);
 }
 
 /**

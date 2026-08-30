@@ -89,7 +89,7 @@ describe('attacksurface_lookup_registration', () => {
     );
 
     const result = await lookupRegistrationTool.handler(
-      lookupRegistrationTool.input.parse({ target: 'HTTPS://EXAMPLE.COM/path', type: 'domain' }),
+      lookupRegistrationTool.input.parse({ target: 'HTTPS://EXAMPLE.COM/path' }),
       context(),
     );
 
@@ -115,8 +115,7 @@ describe('attacksurface_lookup_registration', () => {
     }
   });
 
-  // https://github.com/cyanheads/attack-surface-mcp-server/issues/7
-  it.skip('returns IP registration output for auto-detected CIDR input', async () => {
+  it('returns IP registration output for auto-detected IPv4 CIDR input', async () => {
     fetchMock.mockResolvedValue(
       Response.json({
         name: 'EXAMPLE-NET',
@@ -142,6 +141,60 @@ describe('attacksurface_lookup_registration', () => {
       statuses: [],
       events: [],
     });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://rdap.example.test/ip/8.8.8.0%2F24',
+      expect.objectContaining({ redirect: 'manual' }),
+    );
+    const blocks = lookupRegistrationTool.format?.(result);
+    expect(blocks?.[0]).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining('Registration: 8.8.8.0/24 (ip)'),
+    });
+  });
+
+  it('preserves an auto-detected IPv6 CIDR through RDAP and output', async () => {
+    fetchMock.mockResolvedValue(
+      Response.json({
+        name: 'EXAMPLE-V6-NET',
+        cidr0_cidrs: [{ v6prefix: '2001:db8::', length: 32 }],
+      }),
+    );
+
+    const result = await lookupRegistrationTool.handler(
+      lookupRegistrationTool.input.parse({ target: '2001:db8::/32' }),
+      context(),
+    );
+
+    expect(result).toEqual(expect.schemaMatching(lookupRegistrationTool.output));
+    expect(result.registration).toMatchObject({
+      kind: 'ip',
+      target: '2001:db8::/32',
+      cidrs: ['2001:db8::/32'],
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://rdap.example.test/ip/2001%3Adb8%3A%3A%2F32',
+      expect.objectContaining({ redirect: 'manual' }),
+    );
+    const blocks = lookupRegistrationTool.format?.(result);
+    expect(blocks?.[0]).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining('Registration: 2001:db8::/32 (ip)'),
+    });
+  });
+
+  it('retains explicit IP normalization behavior', async () => {
+    fetchMock.mockResolvedValue(Response.json({ name: 'EXAMPLE-NET' }));
+
+    const result = await lookupRegistrationTool.handler(
+      lookupRegistrationTool.input.parse({ target: ' 8.8.8.8 ', type: 'ip' }),
+      context(),
+    );
+
+    expect(result.registration).toMatchObject({ kind: 'ip', target: '8.8.8.8' });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://rdap.example.test/ip/8.8.8.8',
+      expect.objectContaining({ redirect: 'manual' }),
+    );
   });
 
   it('enforces type enum boundaries and returns the typed invalid_target envelope', async () => {

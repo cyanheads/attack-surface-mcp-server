@@ -155,7 +155,7 @@ describe('RegistrationService fuzz', () => {
   });
 
   // https://github.com/cyanheads/attack-surface-mcp-server/issues/8
-  it.skip('does not consume the next WHOIS record when a field value is empty', async () => {
+  it('does not consume the next WHOIS record when a field value is empty', async () => {
     fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
     netBoundary.response = 'NetName:\nCIDR:\nOriginAS: AS1\nCountry: AA';
 
