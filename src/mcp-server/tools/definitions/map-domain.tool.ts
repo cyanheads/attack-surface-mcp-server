@@ -139,6 +139,8 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
       code: JsonRpcErrorCode.NotFound,
       when: 'No subdomains were discovered and the apex did not resolve.',
       retryable: true,
+      // An empty surface is an ordinary answer, not an incident — log it below the error level.
+      severity: 'notice',
       recovery:
         'Verify the domain. CT sources may be transiently down — retry, or use resolve_dns on the apex directly.',
     },

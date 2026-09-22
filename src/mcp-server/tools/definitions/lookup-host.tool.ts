@@ -101,6 +101,8 @@ export const lookupHostTool = tool('attacksurface_lookup_host', {
       reason: 'no_data',
       code: JsonRpcErrorCode.NotFound,
       when: 'Shodan has no information for the target IP.',
+      // An unscanned IP is an ordinary answer, not an incident — log it below the error level.
+      severity: 'notice',
       recovery:
         'Shodan may not have scanned this host. Try map_domain or inspect_tls/probe_http for live posture.',
     },
