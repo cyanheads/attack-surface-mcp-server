@@ -154,10 +154,12 @@ describe('ShodanService', () => {
   });
 
   // 401/429 are re-labeled by the service; other statuses pass through the framework's
-  // status-mapped error verbatim (`Fetch failed for <url>. Status: <code>`).
+  // status-mapped error verbatim (`Fetch failed for <url>. Status: <code>`). A 500 maps to
+  // ServiceUnavailable like the rest of the 5xx range, so it retries too.
   it.each([
     [401, 'rejected the API key'],
     [429, 'rate limit / no query credits'],
+    [500, 'Fetch failed for https://api.shodan.io/shodan/host/8.8.8.8?…. Status: 500'],
     [503, 'Fetch failed for https://api.shodan.io/shodan/host/8.8.8.8?…. Status: 503'],
   ])('surfaces HTTP %i failures after bounded retries', async (status, message) => {
     vi.useFakeTimers();
