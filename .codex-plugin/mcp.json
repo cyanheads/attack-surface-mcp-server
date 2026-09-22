@@ -3,9 +3,8 @@
     "command": "npx",
     "args": ["-y", "@cyanheads/attack-surface-mcp-server"],
     "env": {
-      "MCP_TRANSPORT_TYPE": "stdio",
-      "SHODAN_API_KEY": "${SHODAN_API_KEY}",
-      "CERTSPOTTER_API_KEY": "${CERTSPOTTER_API_KEY}"
-    }
+      "MCP_TRANSPORT_TYPE": "stdio"
+    },
+    "env_vars": ["SHODAN_API_KEY", "CERTSPOTTER_API_KEY"]
   }
 }

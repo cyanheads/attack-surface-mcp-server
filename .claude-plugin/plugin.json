@@ -1,22 +1,41 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "attack-surface-mcp-server",
   "version": "0.2.1",
   "description": "Passive external attack-surface mapping: CT subdomains, DNS, TLS, HTTP posture, RDAP/WHOIS, Shodan via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
     "url": "https://github.com/cyanheads"
   },
   "homepage": "https://github.com/cyanheads/attack-surface-mcp-server",
   "repository": "https://github.com/cyanheads/attack-surface-mcp-server",
   "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "attack-surface", "easm", "recon", "security"],
+  "userConfig": {
+    "SHODAN_API_KEY": {
+      "type": "string",
+      "title": "Shodan API key",
+      "description": "Optional. Enables attacksurface_lookup_host (host intelligence). The rest of the server works without it.",
+      "sensitive": true,
+      "default": ""
+    },
+    "CERTSPOTTER_API_KEY": {
+      "type": "string",
+      "title": "Certspotter API key",
+      "description": "Optional. Raises Certspotter rate limits for the CT-log subdomain fallback.",
+      "sensitive": true,
+      "default": ""
+    }
+  },
   "mcpServers": {
     "attack-surface-mcp-server": {
       "command": "npx",
       "args": ["-y", "@cyanheads/attack-surface-mcp-server"],
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
-        "SHODAN_API_KEY": "${SHODAN_API_KEY}",
-        "CERTSPOTTER_API_KEY": "${CERTSPOTTER_API_KEY}"
+        "SHODAN_API_KEY": "${user_config.SHODAN_API_KEY}",
+        "CERTSPOTTER_API_KEY": "${user_config.CERTSPOTTER_API_KEY}"
       }
     }
   }
