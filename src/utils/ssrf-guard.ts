@@ -238,16 +238,19 @@ export async function assertSafeDomain(domain: string): Promise<void> {
 
 /**
  * Validate a bare host and return a public IP to connect to, pinning the connection to an address
- * that was actually checked (closes the DNS-rebinding window between check and connect). Returns
- * `null` when the caller should connect by hostname instead: a literal-IP input (already the target),
- * a DNS failure (let the connect surface it), or when private targets are explicitly allowed.
- * Throws `SSRF_BLOCKED` when the host resolves to a non-public address. The caller must still send
- * the original hostname as TLS SNI / HTTP Host so certificate validation and vhost routing hold.
+ * that was actually checked (closes the DNS-rebinding window between check and connect). A
+ * dual-stack host pins to IPv4: resolver order is runtime-dependent (Bun lists AAAA first), and a
+ * client network without an IPv6 route — Docker's default bridge included — cannot dial the AAAA.
+ * Returns `null` when the caller should connect by hostname instead: a literal-IP input (already the
+ * target), a DNS failure (let the connect surface it), or when private targets are explicitly
+ * allowed. Throws `SSRF_BLOCKED` when the host resolves to a non-public address. The caller must
+ * still send the original hostname as TLS SNI / HTTP Host so certificate validation and vhost
+ * routing hold.
  */
 export async function resolveSafeHost(host: string): Promise<string | null> {
   if (privateTargetsAllowed()) return null;
   const validated = await resolveAndCheck(host, `Host "${host}"`);
-  return validated[0] ?? null;
+  return validated.find((ip) => !ip.includes(':')) ?? validated[0] ?? null;
 }
 
 /**

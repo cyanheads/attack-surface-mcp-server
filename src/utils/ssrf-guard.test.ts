@@ -155,4 +155,34 @@ describe('resolveSafeHost', () => {
     process.env.ATTACKSURFACE_ALLOW_PRIVATE_TARGETS = 'true';
     await expect(resolveSafeHost('127.0.0.1')).resolves.toBeNull();
   });
+
+  it('pins a single-address host to that address', async () => {
+    dnsBoundary.lookup.mockResolvedValue([{ address: '104.26.10.117', family: 4 }]);
+    await expect(resolveSafeHost('example.test')).resolves.toBe('104.26.10.117');
+  });
+
+  it('pins a dual-stack host to IPv4 even when the resolver lists AAAA records first', async () => {
+    // Bun's lookup returns AAAA ahead of A; dialing IPv6 first fails on networks with no v6 route.
+    dnsBoundary.lookup.mockResolvedValue([
+      { address: '2606:4700:20::681a:a75', family: 6 },
+      { address: '2606:4700:20::681a:b75', family: 6 },
+      { address: '104.26.10.117', family: 4 },
+      { address: '172.67.72.95', family: 4 },
+    ]);
+    await expect(resolveSafeHost('example.test')).resolves.toBe('104.26.10.117');
+  });
+
+  it('pins an IPv6-only host to its IPv6 address', async () => {
+    dnsBoundary.lookup.mockResolvedValue([{ address: '2606:4700:20::681a:a75', family: 6 }]);
+    await expect(resolveSafeHost('example.test')).resolves.toBe('2606:4700:20::681a:a75');
+  });
+
+  it('still rejects a host when any resolved address is private, wherever it sits in the list', async () => {
+    dnsBoundary.lookup.mockResolvedValue([
+      { address: '2606:4700:20::681a:a75', family: 6 },
+      { address: '104.26.10.117', family: 4 },
+      { address: '10.0.0.5', family: 4 },
+    ]);
+    await expect(resolveSafeHost('example.test')).rejects.toThrow(/SSRF_BLOCKED.*10\.0\.0\.5/);
+  });
 });
