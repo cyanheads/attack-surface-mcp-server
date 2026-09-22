@@ -1,6 +1,6 @@
 # attack-surface-mcp-server - Directory Structure
 
-Generated on: 2026-08-30 21:34:40
+Generated on: 2026-09-22 03:48:28
 
 ```text
 attack-surface-mcp-server/
@@ -14,6 +14,8 @@ attack-surface-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── workflows/
+│   │   └── codeql.yml
 │   ├── CODE_OF_CONDUCT.md
 │   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
@@ -27,23 +29,7 @@ attack-surface-mcp-server/
 │   └── template.md
 ├── docs/
 │   └── design.md
-├── scripts/
-│   ├── build-changelog.ts
-│   ├── build.ts
-│   ├── check-dependency-specifiers.ts
-│   ├── check-docs-sync.ts
-│   ├── check-framework-antipatterns.ts
-│   ├── check-skill-versions.ts
-│   ├── check-skills-sync.ts
-│   ├── clean-mcpb.ts
-│   ├── clean.ts
-│   ├── devcheck.ts
-│   ├── lint-mcp.ts
-│   ├── lint-packaging.ts
-│   ├── list-skills.ts
-│   ├── release-github.ts
-│   └── tree.ts
-├── skills/
+├── framework-skills/
 │   ├── add-app-tool/
 │   │   └── SKILL.md
 │   ├── add-prompt/
@@ -114,6 +100,8 @@ attack-surface-mcp-server/
 │   │   └── SKILL.md
 │   ├── release-and-publish/
 │   │   └── SKILL.md
+│   ├── release-pr-review/
+│   │   └── SKILL.md
 │   ├── report-issue-framework/
 │   │   └── SKILL.md
 │   ├── report-issue-local/
@@ -128,6 +116,22 @@ attack-surface-mcp-server/
 │   │   └── SKILL.md
 │   └── tool-defs-analysis/
 │       └── SKILL.md
+├── scripts/
+│   ├── build-changelog.ts
+│   ├── build.ts
+│   ├── check-dependency-specifiers.ts
+│   ├── check-docs-sync.ts
+│   ├── check-framework-antipatterns.ts
+│   ├── check-skill-versions.ts
+│   ├── check-skills-sync.ts
+│   ├── clean-mcpb.ts
+│   ├── clean.ts
+│   ├── devcheck.ts
+│   ├── lint-mcp.ts
+│   ├── lint-packaging.ts
+│   ├── list-skills.ts
+│   ├── release-github.ts
+│   └── tree.ts
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -195,7 +199,8 @@ attack-surface-mcp-server/
 │   │   ├── map-domain.tool.test.ts
 │   │   ├── probe-http.tool.test.ts
 │   │   ├── recon-guidance.tool.test.ts
-│   │   └── resolve-dns.tool.test.ts
+│   │   ├── resolve-dns.tool.test.ts
+│   │   └── session-mode.test.ts
 │   ├── prompts/
 │   ├── resources/
 │   ├── smoke/
