@@ -31,6 +31,8 @@ await createApp({
     'tools (enumerate_subdomains, resolve_dns, inspect_tls, probe_http, lookup_registration) back ' +
     'it for targeted follow-up. All core capabilities are keyless; attacksurface_lookup_host needs ' +
     'SHODAN_API_KEY and returns source_unavailable without it while everything else keeps working.',
+  // No per-session state or ctx.requestInput; an explicit MCP_SESSION_MODE still overrides this.
+  sessionMode: 'stateless',
   tools: allToolDefinitions,
   resources: allResourceDefinitions,
   setup(core) {
