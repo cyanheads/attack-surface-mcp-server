@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/attack-surface-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Fattack-surface-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/attack-surface-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/attack-surface-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Fattack-surface-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/attack-surface-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -26,9 +26,11 @@
 
 ---
 
-## Tools
+## Overview
 
-Eight tools organized around the recon workflow — `attacksurface_map_domain` orchestrates the full flow end to end, the per-aspect tools back it for targeted follow-up, and `attacksurface_recon_guidance` synthesizes findings into a defensive review plan. Seven are keyless; one (`attacksurface_lookup_host`) needs a Shodan key and degrades gracefully without it.
+Passive external attack-surface mapping (EASM) over Certificate Transparency logs, DNS, TLS, HTTP, and RDAP/WHOIS registries, with optional Shodan host intelligence. Discover subdomains, resolve DNS records, and inspect TLS and HTTP security posture across a domain's live hosts. Runs as a stdio process or a local Streamable HTTP server.
+
+### Tools
 
 | Tool | Description |
 |:---|:---|
@@ -41,9 +43,17 @@ Eight tools organized around the recon workflow — `attacksurface_map_domain` o
 | `attacksurface_lookup_host` | Infrastructure intelligence for a single IP (open ports, banners, software versions, ASN, geo) or a faceted internet-wide search, via Shodan. **Requires `SHODAN_API_KEY`** — returns a typed `source_unavailable` error when unset; the rest of the server is unaffected. |
 | `attacksurface_recon_guidance` | Offline synthesis over findings gathered so far. Returns a prioritized **defensive** review plan plus pre-filled follow-up calls (which certs to renew, which hosts to inspect, which software versions to check for CVEs against an external NVD/OSV server). No external calls. |
 
-### `attacksurface_map_domain`
+### Resources
 
-The spine of most engagements — one call maps a domain end to end.
+| Resource | Description |
+|:---|:---|
+| `attacksurface://surface/{domain}` | Read-once snapshot of a domain's mapped external surface (subdomains, live hosts, per-host TLS/HTTP posture summary), equivalent to a standard-depth `attacksurface_map_domain` call. |
+
+All resource data is also reachable via tools — tool-only clients lose nothing, since `attacksurface_map_domain` covers the same ground.
+
+## Capability reference
+
+### `attacksurface_map_domain` <sub>tool</sub>
 
 - `depth` control: `quick` = subdomains + liveness only; `standard` = + DNS records, TLS, and HTTP posture; `thorough` = + Shodan enrichment (when a key is present, otherwise skipped with a note)
 - `includeRegistration` adds an RDAP/WHOIS lookup for the apex at standard+ depth
@@ -53,9 +63,7 @@ The spine of most engagements — one call maps a domain end to end.
 
 ---
 
-### `attacksurface_enumerate_subdomains`
-
-Passive subdomain discovery from public Certificate Transparency logs.
+### `attacksurface_enumerate_subdomains` <sub>tool</sub>
 
 - Three sources with a fallback chain: crt.sh (primary), Certspotter (fallback — crt.sh is frequently overloaded), and the apex's own TLS certificate SAN list (always available)
 - Every discovered name carries its source provenance
@@ -64,21 +72,18 @@ Passive subdomain discovery from public Certificate Transparency logs.
 
 ---
 
-### `attacksurface_resolve_dns`
+### `attacksurface_resolve_dns` <sub>tool</sub>
 
-Multi-resolver DNS enumeration with propagation visibility.
-
-- Queries A, AAAA, CNAME, MX, NS, TXT, and CAA across multiple public resolvers (default `8.8.8.8`, `1.1.1.1`, `9.9.9.9`)
+- Up to 50 hosts per call; queries A, AAAA, CNAME, MX, NS, TXT, and CAA across multiple public resolvers (default `8.8.8.8`, `1.1.1.1`, `9.9.9.9`)
 - Reports per-resolver answers so propagation gaps and split-horizon DNS are visible
 - Optional reverse DNS (PTR) on resolved addresses
-- Each host passes the SSRF guard; private/loopback resolver IPs are rejected; one failing host degrades to a per-host error
+- Each host and resolver IP passes the SSRF guard; a private/loopback resolver IP is rejected as a typed `blocked_resolver` error; one failing host degrades to a per-host error
 
 ---
 
-### `attacksurface_inspect_tls`
+### `attacksurface_inspect_tls` <sub>tool</sub>
 
-Read-only TLS posture inspection — surfacing problems is the point.
-
+- Up to 50 hosts per call; port defaults to 443, handshake timeout defaults to 8000ms (1000–30000ms range)
 - A real handshake per host reports negotiated protocol and cipher, the full certificate chain, SANs, validity window, days-to-expiry, issuer, and chain-validation status
 - Invalid, expired, and self-signed certificates are inspected and reported rather than throwing
 - Posture findings flag short expiry windows, deprecated protocols, and self-signed chains
@@ -86,65 +91,54 @@ Read-only TLS posture inspection — surfacing problems is the point.
 
 ---
 
-### `attacksurface_probe_http`
+### `attacksurface_probe_http` <sub>tool</sub>
 
-A single passive HTTP(S) GET with a security read-out.
-
+- One `http(s)://` URL per call; timeout defaults to 10000ms (1000–30000ms range)
 - Follows redirects and reports the final status plus the full redirect chain
 - Security-header audit: HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy, cookie Secure/HttpOnly/SameSite flags, and CORS origin-reflection
 - Evidence-bound technology fingerprint (server, framework, CDN, WAF, CMS) — every detection names the header or body marker that triggered it
-- Strictly one request per host — no path traversal, parameter injection, or multi-method probing; every redirect hop is re-checked against the SSRF guard
+- Strictly one request per host — no path traversal, parameter injection, or multi-method probing; every redirect hop is re-checked against the SSRF guard, surfaced as a typed `blocked_target` error
 
 ---
 
-### `attacksurface_lookup_registration`
+### `attacksurface_lookup_registration` <sub>tool</sub>
 
-Registration and ownership from public registries.
-
-- RDAP first (structured JSON, manual 302-follow with a fresh 5s timeout covering SSRF validation and the request for each hop, plus a five-redirect cap), WHOIS port-43 fallback for TLDs without RDAP or when a hop is unresponsive
+- `target` accepts a domain, IP, or CIDR; `type` (`auto` / `domain` / `ip`) forces interpretation or lets it auto-detect
+- RDAP first (structured JSON), WHOIS port-43 fallback for TLDs without RDAP or when a hop is unresponsive
 - Domain lookups return registrar, EPP status codes, registration/expiry/updated events, nameservers, and DNSSEC
 - IP/CIDR lookups return the netblock name, allocation CIDRs, origin ASN, and country
 - Registry data is frequently redacted or sparse — absent fields are reported as unknown, never inferred
 
 ---
 
-### `attacksurface_lookup_host`
-
-Shodan infrastructure intelligence — the one optional-key path.
+### `attacksurface_lookup_host` <sub>tool</sub>
 
 - `mode: "host"` (default) — a free single-IP lookup: open ports, service banners, software versions, hostnames, ASN, geo
-- `mode: "search"` — a faceted internet-wide query that consumes paid Shodan query credits
+- `mode: "search"` — a faceted internet-wide query (optional `facets`) that consumes paid Shodan query credits
 - Requires `SHODAN_API_KEY`; without it the tool returns a typed `source_unavailable` error and every other tool keeps working
+- No Shodan data for the target IP returns a typed `no_data` error rather than an empty result
 - Shodan data reflects Shodan's last scan, not a live port state — the server itself never scans ports
 
 ---
 
-### `attacksurface_recon_guidance`
-
-State-aware synthesis — no network calls, just reasoning over what you've found.
+### `attacksurface_recon_guidance` <sub>tool</sub>
 
 - Takes the findings gathered so far (live hosts, TLS/cert state, missing headers, software versions, open ports) and returns a prioritized defensive review plan as markdown plus structured priority items
 - Pre-fills concrete follow-up calls — re-inspecting hosts that lack posture data, and chaining disclosed software versions to an external NVD (`nist-nvd-mcp-server`) or OSV (`osv-advisory-mcp-server`) server for CVE context
-- Output is a remediation/visibility plan, never an exploitation playbook
+- `topic` (`triage` / `posture` / `coverage`) shapes plan emphasis; output is a remediation/visibility plan, never an exploitation playbook
+- Read-only — no network calls, just reasoning over the supplied state
 
-## Resources
+---
 
-| Type | Name | Description |
-|:---|:---|:---|
-| Resource | `attacksurface://surface/{domain}` | Read-once snapshot of a domain's mapped surface (subdomains, live hosts, per-host TLS/HTTP posture summary), equivalent to a standard-depth `attacksurface_map_domain` call. |
+### `attacksurface://surface/{domain}` <sub>resource</sub>
 
-All resource data is also reachable via tools — tool-only clients lose nothing, since `attacksurface_map_domain` covers the same ground. Large maps disclose a truncation count rather than returning unbounded host detail. The server exposes no prompts; `attacksurface_recon_guidance` supplies the one "structure the next steps" pattern as a state-aware tool instead of a static template.
+- Returns `application/json`: subdomain count, live-host count, and a per-host TLS/HTTP posture summary — equivalent to a standard-depth `attacksurface_map_domain` call
+- Host detail is capped at 50 live hosts; beyond that the response discloses an omitted count and points to `attacksurface_map_domain` for the full set
+- Read-only snapshot; the same data is fully reachable via tools
 
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp-ts-core):
-
-- Declarative tool and resource definitions — single file per primitive, framework handles registration and validation
-- Unified error handling — handlers throw, framework catches, classifies, and formats
-- Pluggable auth: `none`, `jwt`, `oauth`
-- Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
-- Structured logging with optional OpenTelemetry tracing
-- STDIO and Streamable HTTP transports
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
 Attack-surface-specific:
 
@@ -225,7 +219,7 @@ Refer to "your MCP client configuration file" generically — different clients 
 
 ### Prerequisites
 
-- [Bun v1.3.0](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
 - No API key required for the core tools. Optional: a [Shodan API key](https://account.shodan.io/) for `attacksurface_lookup_host`, and a [Certspotter API key](https://sslmate.com/certspotter/api/) to raise CT-fallback rate limits.
 
 ### Installation
@@ -264,12 +258,13 @@ All variables are optional — the server boots and delivers its keyless core wi
 | `SHODAN_API_KEY` | Enables `attacksurface_lookup_host`. Absent → that tool returns `source_unavailable`; every other tool keeps working. | — |
 | `CERTSPOTTER_API_KEY` | Raises Certspotter rate limits for the CT-log subdomain fallback. Absent → free unauthenticated tier (rate-limited but functional). | — |
 | `ATTACKSURFACE_DEFAULT_RESOLVERS` | Comma-separated default DNS resolver IPs for `attacksurface_resolve_dns`. | `8.8.8.8,1.1.1.1,9.9.9.9` |
-| `ATTACKSURFACE_HTTP_USER_AGENT` | Default User-Agent for `attacksurface_probe_http` (overridable per call). | identifies the server honestly |
+| `ATTACKSURFACE_HTTP_USER_AGENT` | Default User-Agent for `attacksurface_probe_http` (overridable per call). | `attack-surface-mcp-server/passive-recon (+https://github.com/cyanheads/attack-surface-mcp-server)` |
 | `ATTACKSURFACE_MAX_SUBDOMAINS` | Cap on subdomains resolved during a `map_domain` run — bounds fan-out cost. | `200` |
 | `ATTACKSURFACE_RDAP_BOOTSTRAP_URL` | RDAP bootstrap base URL; override for a private/mirrored RDAP. | `https://rdap.org` |
 | `ATTACKSURFACE_ALLOW_PRIVATE_TARGETS` | Set `true` to disable the SSRF guard for internal-network assessment. **Leave `false` on any public deployment** — it is the safety boundary that keeps the server from being pointed at internal infrastructure. | `false` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for HTTP server. | `3010` |
+| `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. The server declares `stateless`; a value set here overrides it. Ignored under stdio. | `stateless` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
@@ -333,7 +328,7 @@ See [`CLAUDE.md`/`AGENTS.md`](./CLAUDE.md) for development guidelines and archit
 
 ## Contributing
 
-Issues and pull requests are welcome. Run checks and tests before submitting:
+Issues are welcome. Run checks and tests before submitting:
 
 ```sh
 bun run devcheck
