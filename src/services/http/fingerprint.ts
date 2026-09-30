@@ -29,6 +29,7 @@ interface BodyRule {
 const HEADER_RULES: HeaderRule[] = [
   {
     header: 'server',
+    match: /^(?!(?:cloudflare|awselb)(?:\/|$))/i,
     name: (v) => v.split('/')[0] ?? v,
     category: 'server',
     version: /[\w-]+\/([\d.]+)/,
@@ -43,6 +44,7 @@ const HEADER_RULES: HeaderRule[] = [
   },
   { header: 'x-generator', name: (v) => v, category: 'cms', version: /([\d.]+)/ },
   // CDNs
+  { header: 'server', match: /^cloudflare(?:\/|$)/i, name: 'Cloudflare', category: 'cdn' },
   { header: 'cf-ray', name: 'Cloudflare', category: 'cdn' },
   { header: 'x-amz-cf-id', name: 'Amazon CloudFront', category: 'cdn' },
   { header: 'x-amz-cf-pop', name: 'Amazon CloudFront', category: 'cdn' },
@@ -58,11 +60,10 @@ const HEADER_RULES: HeaderRule[] = [
   { header: 'x-vercel-id', name: 'Vercel', category: 'cdn' },
   { header: 'x-nf-request-id', name: 'Netlify', category: 'cdn' },
   // WAFs
-  { header: 'server', match: /cloudflare/i, name: 'Cloudflare', category: 'waf' },
   { header: 'x-sucuri-id', name: 'Sucuri WAF', category: 'waf' },
   { header: 'x-sucuri-cache', name: 'Sucuri WAF', category: 'waf' },
-  { header: 'server', match: /awselb/i, name: 'AWS ELB', category: 'waf' },
   { header: 'x-amzn-waf-action', name: 'AWS WAF', category: 'waf' },
+  { header: 'server', match: /^awselb(?:\/|$)/i, name: 'AWS ELB', category: 'other' },
   // Frameworks / languages
   { header: 'x-drupal-cache', name: 'Drupal', category: 'cms' },
   { header: 'x-drupal-dynamic-cache', name: 'Drupal', category: 'cms' },

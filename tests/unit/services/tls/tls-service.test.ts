@@ -25,6 +25,7 @@ const dnsBoundary = vi.hoisted(() => ({ lookup: vi.fn() }));
 vi.mock('node:tls', () => ({ connect: tlsBoundary.connect }));
 vi.mock('node:dns/promises', () => ({ lookup: dnsBoundary.lookup }));
 
+import { inspectTlsTool } from '@/mcp-server/tools/definitions/inspect-tls.tool.js';
 import { TlsService } from '@/services/tls/tls-service.js';
 
 class FakeTlsSocket extends EventEmitter {
@@ -153,8 +154,7 @@ describe('TlsService', () => {
     );
   });
 
-  // Known defect: https://github.com/cyanheads/attack-surface-mcp-server/issues/5
-  it.skip('preserves malformed certificate dates as unknown instead of returning NaN', async () => {
+  it('preserves malformed certificate dates as unknown instead of returning NaN', async () => {
     tlsBoundary.scenarios.push({
       mode: 'success',
       protocol: 'TLSv1.2',
@@ -170,7 +170,89 @@ describe('TlsService', () => {
       validTo: 'bad-not-after',
       daysUntilExpiry: null,
     });
-    expect(result?.findings).toContain('Certificate validity dates could not be parsed.');
+    expect(result?.findings).toContain('Certificate not-before date could not be parsed.');
+    expect(result?.findings).toContain(
+      'Certificate not-after date could not be parsed; expiry is unknown.',
+    );
+    expect(result?.handshakeError).toBeNull();
+    expect({ results: [result] }).toEqual(expect.schemaMatching(inspectTlsTool.output));
+  });
+
+  it.each(['1.1.1.1', '2606:4700:4700::1111', '::ffff:1.1.1.1'])(
+    'omits SNI for literal IP %s while inspecting its certificate',
+    async (host) => {
+      tlsBoundary.scenarios.push({ mode: 'success', certificate: certificate() });
+      const [result] = await new TlsService().inspectHosts([host]);
+      expect(result).toMatchObject({
+        host,
+        handshakeError: null,
+        certificate: { serialNumber: '01AB' },
+      });
+      expect(tlsBoundary.connect.mock.calls[0]?.[0]).toMatchObject({ host });
+      expect(tlsBoundary.connect.mock.calls[0]?.[0]).not.toHaveProperty('servername');
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('leaves no timeout when socket construction throws synchronously', async () => {
+    tlsBoundary.connect.mockImplementation(() => {
+      throw new Error('socket construction failed');
+    });
+    const [result] = await new TlsService().inspectHosts(['secure.example.com'], 443, 1_000);
+    expect(result).toMatchObject({
+      host: 'secure.example.com',
+      certificate: null,
+      handshakeError: 'socket construction failed',
+    });
+    expect.soft(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    ['bad-not-before', 'Jan 21 00:00:00 2026 GMT', 20],
+    ['Dec 01 00:00:00 2025 GMT', 'bad-not-after', null],
+    ['bad-not-before', 'bad-not-after', null],
+  ])('parses validity bounds independently: %s / %s', async (validFrom, validTo, expectedDays) => {
+    vi.stubEnv('ATTACKSURFACE_ALLOW_PRIVATE_TARGETS', 'false');
+    dnsBoundary.lookup.mockResolvedValue([
+      { address: '2606:4700:4700::1111', family: 6 },
+      { address: '93.184.216.34', family: 4 },
+    ]);
+    tlsBoundary.scenarios.push({
+      mode: 'success',
+      certificate: certificate({ valid_from: validFrom, valid_to: validTo }),
+    });
+    const [result] = await new TlsService().inspectHosts(['secure.example.com']);
+    expect(result?.certificate?.daysUntilExpiry).toBe(expectedDays);
+    expect(result?.handshakeError).toBeNull();
+    expect({ results: [result] }).toEqual(expect.schemaMatching(inspectTlsTool.output));
+    expect(JSON.parse(JSON.stringify(result))).toEqual(result);
+    expect(result?.certificate?.subjectAltNames).toContain('www.example.com');
+    expect(tlsBoundary.connect).toHaveBeenCalledWith(
+      expect.objectContaining({ host: '93.184.216.34', servername: 'secure.example.com' }),
+      expect.any(Function),
+    );
+    if (expectedDays === null) {
+      expect(result?.certificate?.validTo).toBe(validTo);
+      expect(result?.findings.some((finding) => /expired|expires in/.test(finding))).toBe(false);
+    }
+    if (validFrom === 'bad-not-before') {
+      expect(result?.certificate?.validFrom).toBe(validFrom);
+      expect(result?.findings).toContain('Certificate not-before date could not be parsed.');
+    }
+  });
+
+  it('keeps SAN fallback usable when expiry is malformed', async () => {
+    tlsBoundary.scenarios.push({
+      mode: 'success',
+      certificate: certificate({ valid_to: 'Bad time value' }),
+    });
+    await expect(new TlsService().getSans('secure.example.com')).resolves.toEqual([
+      'secure.example.com',
+      'www.example.com',
+      '93.184.216.34',
+    ]);
   });
 
   it('reports expired self-signed certificates and deprecated protocols', async () => {

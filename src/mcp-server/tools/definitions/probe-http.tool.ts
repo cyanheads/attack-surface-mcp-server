@@ -89,14 +89,17 @@ export const probeHttpTool = tool('attacksurface_probe_http', {
     finalStatus: z.number().describe('Final HTTP status code (0 when the probe errored).'),
     redirectChain: z
       .array(RedirectHopSchema)
-      .describe('Redirect chain leading to the final response.'),
+      .describe('Followed redirects, capped at ten; another redirect produces a transport error.'),
     headers: z
       .record(z.string(), z.string())
       .describe('Final-response headers (lower-cased keys).'),
     securityAudit: SecurityAuditSchema.describe('Security-header audit.'),
     technologies: z.array(TechDetectionSchema).describe('Technology detections with evidence.'),
     checkedAt: z.string().describe('ISO 8601 timestamp of the probe.'),
-    transportError: z.string().nullable().describe('Transport error, or null on success.'),
+    transportError: z
+      .string()
+      .nullable()
+      .describe('Transport error, including redirect exhaustion, or null on success.'),
   }),
   enrichment: {
     notice: z.string().optional().describe('Guidance when the probe could not reach the target.'),

@@ -171,10 +171,19 @@ describe('HttpService', () => {
     });
   });
 
-  // Known defect: https://github.com/cyanheads/attack-surface-mcp-server/issues/4
-  it.skip('stops with an error after the maximum redirect chain', async () => {
+  it('stops with an error after the maximum redirect chain', async () => {
+    const cancel = vi.fn();
     fetchMock.mockImplementation(
-      async () => new Response(null, { status: 302, headers: { location: '/again' } }),
+      async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new Uint8Array(64_000));
+            },
+            cancel,
+          }),
+          { status: 302, headers: { location: '/again' } },
+        ),
     );
 
     const result = await new HttpService('default-agent').probe(
@@ -186,10 +195,48 @@ describe('HttpService', () => {
 
     expect(result).toMatchObject({
       finalStatus: 0,
-      error: 'Exceeded 10 redirects without a final response.',
+      transportError: 'Exceeded 10 redirects without a final response.',
     });
     expect(result.redirectChain).toHaveLength(10);
     expect(fetchMock).toHaveBeenCalledTimes(11);
+    expect(cancel).toHaveBeenCalledTimes(11);
+  });
+
+  it.each([200, 404, 304])('accepts a final %i after ten redirects', async (status) => {
+    for (let hop = 0; hop < 10; hop++) {
+      fetchMock.mockResolvedValueOnce(
+        new Response(null, { status: 302, headers: { location: `/hop-${hop}` } }),
+      );
+    }
+    fetchMock.mockResolvedValueOnce(new Response(null, { status }));
+    const result = await new HttpService('test').probe(
+      'https://example.com',
+      undefined,
+      1_000,
+      createMockContext(),
+    );
+    expect(result).toMatchObject({ finalStatus: status, transportError: null });
+    expect(result.redirectChain).toHaveLength(10);
+    expect(fetchMock).toHaveBeenCalledTimes(11);
+  });
+
+  it('rejects a private redirect target before fetching it', async () => {
+    vi.stubEnv('ATTACKSURFACE_ALLOW_PRIVATE_TARGETS', 'false');
+    fetchMock.mockResolvedValueOnce(
+      new Response(null, { status: 302, headers: { location: 'http://127.0.0.1/private' } }),
+    );
+    const result = await new HttpService('test').probe(
+      'https://93.184.216.34',
+      undefined,
+      1_000,
+      createMockContext(),
+    );
+    expect(result).toMatchObject({
+      finalStatus: 0,
+      transportError: expect.stringContaining('SSRF_BLOCKED'),
+    });
+    expect(result.redirectChain).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('fingerprints only the bounded body prefix', async () => {

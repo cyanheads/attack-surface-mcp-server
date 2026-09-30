@@ -1,6 +1,6 @@
 /**
  * @fileoverview attacksurface_inspect_tls — inspect TLS/SSL posture for one or more hosts via a real
- * read-only handshake. Reports negotiated protocol + cipher, the certificate chain, SANs, validity
+ * read-only handshake. Reports negotiated protocol + cipher, leaf certificate and chain depth, SANs, validity
  * window, days-to-expiry, issuer, and validation status. Invalid/expired/self-signed certs are
  * inspected and reported, never thrown on. Passive: one handshake per host, no data sent.
  * @module mcp-server/tools/definitions/inspect-tls.tool
@@ -17,16 +17,25 @@ const CertInfoSchema = z
     subjectAltNames: z.array(z.string()).describe('Subject Alternative Names (DNS/IP entries).'),
     issuerCommonName: z.string().describe('Issuer common name.'),
     issuerOrganization: z.string().optional().describe('Issuer organization, when present.'),
-    validFrom: z.string().describe('Not-before validity bound (ISO 8601).'),
-    validTo: z.string().describe('Not-after validity bound (ISO 8601).'),
-    daysUntilExpiry: z.number().describe('Days until expiry; negative when already expired.'),
+    validFrom: z
+      .string()
+      .describe('Not-before validity bound: ISO 8601 when parsed, otherwise the raw peer value.'),
+    validTo: z
+      .string()
+      .describe('Not-after validity bound: ISO 8601 when parsed, otherwise the raw peer value.'),
+    daysUntilExpiry: z
+      .number()
+      .nullable()
+      .describe(
+        'Days until expiry; negative when expired, null when the not-after bound cannot be parsed.',
+      ),
     serialNumber: z.string().describe('Certificate serial number (hex).'),
     fingerprintSha256: z.string().describe('SHA-256 fingerprint of the leaf certificate.'),
     extendedKeyUsages: z
       .array(z.string())
       .describe('Extended key usages, mapped from OID to a readable label where known.'),
   })
-  .describe('A single certificate in the presented chain.');
+  .describe('The leaf certificate presented by the peer.');
 
 const TlsResultSchema = z
   .object({
@@ -62,7 +71,7 @@ const TlsResultSchema = z
 export const inspectTlsTool = tool('attacksurface_inspect_tls', {
   title: 'attacksurface_inspect_tls',
   description:
-    'Inspect TLS/SSL posture for one or more hosts via a real read-only handshake: negotiated protocol and cipher, the full certificate chain, SANs, validity window, days-to-expiry, issuer, and validation status. Invalid, expired, and self-signed certificates are inspected and reported rather than failing — surfacing posture problems is the point. One handshake per host; no application data is sent. SSRF-guarded; per-host failures degrade to a per-host error.',
+    'Inspect TLS/SSL posture for one or more hosts via a real read-only handshake: negotiated protocol and cipher, leaf certificate and chain depth, SANs, validity window, days-to-expiry, issuer, and validation status. Invalid, expired, and self-signed certificates are inspected and reported. Unparseable validity bounds retain their raw values and add findings; an unknown expiry returns null days-to-expiry. One handshake per host; no application data is sent. SSRF-guarded; per-host failures degrade to a per-host error.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
   input: z.object({
     hosts: z

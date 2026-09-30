@@ -37,7 +37,12 @@ const LiveHostSchema = z
         protocol: z.string().nullable().describe('Negotiated TLS protocol.'),
         cipher: z.string().nullable().describe('Negotiated cipher.'),
         issuer: z.string().nullable().describe('Certificate issuer common name.'),
-        daysUntilExpiry: z.number().nullable().describe('Days until certificate expiry.'),
+        daysUntilExpiry: z
+          .number()
+          .nullable()
+          .describe(
+            'Days until certificate expiry, or null when no certificate or parseable expiry is available.',
+          ),
         validationAuthorized: z
           .boolean()
           .describe('Whether the chain validated against the trust store.'),

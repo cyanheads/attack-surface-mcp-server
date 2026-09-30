@@ -143,12 +143,13 @@ export class HttpService {
         const location = response.headers.get('location');
         const isRedirect = status >= 300 && status < 400 && location;
 
-        if (isRedirect && hop < MAX_REDIRECTS) {
+        if (isRedirect) {
+          // Release every redirect body, including the response that exhausts the hop limit.
+          await response.body?.cancel().catch(() => {});
+          if (hop === MAX_REDIRECTS) break;
           redirectChain.push({ url: currentUrl, status, location });
           // Resolve relative redirects against the current URL.
           currentUrl = new URL(location, currentUrl).toString();
-          // Drain the body so the socket can be reused/closed.
-          await response.body?.cancel().catch(() => {});
           continue;
         }
 

@@ -1,12 +1,12 @@
 /**
- * @fileoverview TLS inspection domain types — handshake posture, certificate chain, validation.
+ * @fileoverview TLS inspection domain types — handshake posture, leaf certificate, chain depth, validation.
  * @module services/tls/types
  */
 
-/** One certificate in the presented chain. */
+/** The leaf certificate presented by the peer. */
 export interface CertInfo {
-  /** Days until expiry; negative when already expired. */
-  daysUntilExpiry: number;
+  /** Days until expiry; negative when expired, null when the not-after bound cannot be parsed. */
+  daysUntilExpiry: number | null;
   /** Extended key usages, mapped from OID to a readable label where known. */
   extendedKeyUsages: string[];
   /** SHA-256 fingerprint. */
@@ -21,9 +21,9 @@ export interface CertInfo {
   subjectAltNames: string[];
   /** Subject common name. */
   subjectCommonName: string;
-  /** Not-before validity bound (ISO 8601). */
+  /** Not-before validity bound: ISO 8601 when parsed, otherwise the raw peer value. */
   validFrom: string;
-  /** Not-after validity bound (ISO 8601). */
+  /** Not-after validity bound: ISO 8601 when parsed, otherwise the raw peer value. */
   validTo: string;
 }
 

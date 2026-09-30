@@ -5,7 +5,7 @@
 
 import { EventEmitter } from 'node:events';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const dnsBoundary = vi.hoisted(() => ({ resolve: vi.fn() }));
@@ -26,9 +26,11 @@ vi.mock('node:dns/promises', () => ({
 vi.mock('node:tls', () => ({ connect: tlsBoundary.connect }));
 
 import { getServerConfig, resetServerConfig } from '@/config/server-config.js';
+import { surfaceResource } from '@/mcp-server/resources/definitions/surface.resource.js';
 import { mapDomainTool } from '@/mcp-server/tools/definitions/map-domain.tool.js';
 import { initCtService } from '@/services/ct/ct-service.js';
 import { initDnsService } from '@/services/dns/dns-service.js';
+import { initHttpService } from '@/services/http/http-service.js';
 import { initTlsService } from '@/services/tls/tls-service.js';
 
 type HandlerCtx = Parameters<typeof mapDomainTool.handler>[1];
@@ -40,6 +42,38 @@ class ErrorTlsSocket extends EventEmitter {
   }
 
   destroy() {}
+}
+
+class CertificateSocket extends EventEmitter {
+  authorized = true;
+  authorizationError = undefined;
+
+  constructor(
+    private readonly validTo: string,
+    callback: () => void,
+  ) {
+    super();
+    queueMicrotask(callback);
+  }
+
+  destroy() {}
+  getProtocol() {
+    return 'TLSv1.3';
+  }
+  getCipher() {
+    return { standardName: 'TLS_AES_128_GCM_SHA256' };
+  }
+  getPeerCertificate() {
+    return {
+      subject: { CN: 'example.com' },
+      issuer: { CN: 'Example CA' },
+      subjectaltname: 'DNS:example.com',
+      valid_from: 'Jan 01 00:00:00 2026 GMT',
+      valid_to: this.validTo,
+      serialNumber: '01',
+      fingerprint256: 'AA:BB',
+    };
+  }
 }
 
 function context(): HandlerCtx {
@@ -61,6 +95,7 @@ describe('attacksurface_map_domain', () => {
     initCtService(config);
     initDnsService();
     initTlsService();
+    initHttpService('test-agent');
   });
 
   afterEach(() => {
@@ -154,6 +189,51 @@ describe('attacksurface_map_domain', () => {
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it.each(['Jan 01 00:00:00 2030 GMT', 'Bad time value'])(
+    'preserves TLS expiry %s in mapped and resource summaries',
+    async (validTo) => {
+      tlsBoundary.connect.mockImplementation(
+        (_options, callback) => new CertificateSocket(validTo, callback),
+      );
+      dnsBoundary.resolve.mockImplementation(async (type) =>
+        type === 'A' ? ['93.184.216.34'] : [],
+      );
+      fetchMock.mockImplementation(async (input) => {
+        const origin = new URL(String(input)).origin;
+        if (origin === 'https://crt.sh' || origin === 'https://api.certspotter.com')
+          return Response.json([]);
+        return new Response('', { headers: { server: 'cloudflare' } });
+      });
+      const result = await runToolContract(mapDomainTool, {
+        domain: 'example.com',
+        depth: 'standard',
+        includeRegistration: false,
+      });
+      const daysUntilExpiry = validTo === 'Bad time value' ? null : expect.any(Number);
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        liveHosts: [
+          {
+            tls: { daysUntilExpiry },
+            http: { technologies: [{ name: 'Cloudflare', category: 'cdn' }] },
+          },
+        ],
+      });
+      expect(JSON.stringify(result.content)).toContain('Cloudflare (cdn)');
+      const resource = await surfaceResource.handler(
+        { domain: 'example.com' },
+        createMockContext(),
+      );
+      expect(resource).toMatchObject({ hosts: [{ tls: { daysUntilExpiry } }] });
+      expect(JSON.parse(JSON.stringify(resource))).toEqual(resource);
+      if (validTo === 'Bad time value') {
+        expect(JSON.stringify(result.content)).toContain('unknown days left');
+        expect(JSON.stringify(result.content)).toContain('expiry is unknown');
+        expect(JSON.stringify(resource)).toContain('expiry is unknown');
+      }
+    },
+  );
 
   it('returns the typed no_surface envelope when CT is empty and the apex does not resolve', async () => {
     fetchMock.mockImplementation(async (input) =>

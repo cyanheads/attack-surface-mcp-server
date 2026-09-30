@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { probeHttpTool } from '@/mcp-server/tools/definitions/probe-http.tool.js';
 import { initHttpService } from '@/services/http/http-service.js';
@@ -89,6 +89,23 @@ describe('attacksurface_probe_http', () => {
     ).toBe(true);
   });
 
+  it.each([
+    ['cloudflare', 'Cloudflare', 'cdn'],
+    ['awselb/2.0', 'AWS ELB', 'other'],
+  ])('reports %s evidence accurately on both output paths', async (server, name, category) => {
+    fetchMock.mockResolvedValue(new Response('', { headers: { server } }));
+    const result = await runToolContract(probeHttpTool, { url: 'https://example.com' });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      technologies: [{ name, category, evidence: `server: ${server}` }],
+    });
+    const text = JSON.stringify(result.content);
+    expect(text).toContain(`**${name}**  _(${category})_`);
+    expect(text).toContain(`server: ${server}`);
+    expect(text).not.toContain('_(waf)_');
+    expect(text).not.toContain('_(server)_');
+  });
+
   it('returns the typed blocked_target error envelope for a forbidden scheme', async () => {
     const input = probeHttpTool.input.parse({ url: 'file:///etc/passwd' });
 
@@ -115,5 +132,24 @@ describe('attacksurface_probe_http', () => {
     expect(getEnrichment(ctx)).toEqual({
       notice: 'Could not complete the probe of https://example.com: ECONNRESET',
     });
+  });
+
+  it('discloses redirect exhaustion on both output paths', async () => {
+    fetchMock.mockImplementation(
+      async () => new Response(null, { status: 302, headers: { location: '/again' } }),
+    );
+    const result = await runToolContract(probeHttpTool, { url: 'https://example.com' });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      finalStatus: 0,
+      transportError: 'Exceeded 10 redirects without a final response.',
+      redirectChain: expect.arrayContaining([
+        { url: 'https://example.com', status: 302, location: '/again' },
+      ]),
+    });
+    expect(JSON.stringify(result.content)).toContain(
+      'Exceeded 10 redirects without a final response.',
+    );
+    expect(JSON.stringify(result.content)).toContain('Could not complete the probe');
   });
 });

@@ -2,13 +2,14 @@
  * @fileoverview TLS inspection service — pure node:tls read-only handshake. Connects with
  * `rejectUnauthorized: false` so invalid/expired/self-signed certificates are *inspected and
  * reported* rather than throwing (posture findings are the point). Extracts negotiated protocol +
- * cipher, the full certificate chain, SANs, validity window, days-to-expiry, issuer, validation
+ * cipher, the leaf certificate and chain depth, SANs, validity window, days-to-expiry, issuer, validation
  * status, and extended key usages (OID → readable). Every host is SSRF-validated before connecting,
  * and the socket is pinned to the validated IP (SNI keeps the hostname) so a DNS-rebinding answer
  * cannot redirect the handshake to an internal address between check and connect.
  * @module services/tls/tls-service
  */
 
+import { isIP } from 'node:net';
 import * as tls from 'node:tls';
 import { resolveSafeHost } from '@/utils/ssrf-guard.js';
 import type { CertInfo, TlsResult } from './types.js';
@@ -59,7 +60,9 @@ function buildCertInfo(
   const now = Date.now();
   const validFrom = new Date(cert.valid_from);
   const validTo = new Date(cert.valid_to);
-  const daysUntilExpiry = Math.floor((validTo.getTime() - now) / 86_400_000);
+  const hasValidFrom = !Number.isNaN(validFrom.getTime());
+  const hasValidTo = !Number.isNaN(validTo.getTime());
+  const daysUntilExpiry = hasValidTo ? Math.floor((validTo.getTime() - now) / 86_400_000) : null;
 
   const subjectCommonName = firstString(cert.subject?.CN, host);
   const issuerCommonName = firstString(cert.issuer?.CN ?? cert.issuer?.O, 'unknown');
@@ -84,12 +87,17 @@ function buildCertInfo(
   const extendedKeyUsages = ekuRaw.map(labelEku);
 
   // Posture findings.
-  if (daysUntilExpiry < 0) {
-    findings.push(`Certificate expired ${Math.abs(daysUntilExpiry)} day(s) ago.`);
-  } else if (daysUntilExpiry < 14) {
-    findings.push(`Certificate expires in ${daysUntilExpiry} day(s) — critical.`);
-  } else if (daysUntilExpiry < 30) {
-    findings.push(`Certificate expires in ${daysUntilExpiry} day(s) — renew soon.`);
+  if (!hasValidFrom) findings.push('Certificate not-before date could not be parsed.');
+  if (!hasValidTo)
+    findings.push('Certificate not-after date could not be parsed; expiry is unknown.');
+  if (daysUntilExpiry !== null) {
+    if (daysUntilExpiry < 0) {
+      findings.push(`Certificate expired ${Math.abs(daysUntilExpiry)} day(s) ago.`);
+    } else if (daysUntilExpiry < 14) {
+      findings.push(`Certificate expires in ${daysUntilExpiry} day(s) — critical.`);
+    } else if (daysUntilExpiry < 30) {
+      findings.push(`Certificate expires in ${daysUntilExpiry} day(s) — renew soon.`);
+    }
   }
   const selfSigned =
     issuerCommonName === subjectCommonName && (chainDepth === 1 || cert.issuerCertificate === cert);
@@ -100,8 +108,8 @@ function buildCertInfo(
     subjectAltNames,
     issuerCommonName,
     ...(issuerOrganization ? { issuerOrganization } : {}),
-    validFrom: Number.isNaN(validFrom.getTime()) ? cert.valid_from : validFrom.toISOString(),
-    validTo: Number.isNaN(validTo.getTime()) ? cert.valid_to : validTo.toISOString(),
+    validFrom: hasValidFrom ? validFrom.toISOString() : cert.valid_from,
+    validTo: hasValidTo ? validTo.toISOString() : cert.valid_to,
     daysUntilExpiry,
     serialNumber: cert.serialNumber ?? '',
     fingerprintSha256: cert.fingerprint256 ?? '',
@@ -113,8 +121,8 @@ function buildCertInfo(
 /**
  * Perform one read-only TLS handshake and extract posture. Never rejects on cert validity.
  * `connectIp` is the SSRF-validated address to dial (pins the connection to a checked IP, closing
- * the rebinding window); when null the socket connects by `host`. `host` is always used as SNI and
- * for `checkServerIdentity`/reporting, so certificate validation reflects the hostname, not the IP.
+ * the rebinding window); when null the socket connects by `host`. DNS hostnames retain their
+ * original SNI while literal IPs omit it. Results always identify the requested host.
  */
 function inspectOne(
   host: string,
@@ -134,27 +142,11 @@ function inspectOne(
       resolve(result);
     };
 
-    const timer = setTimeout(() => {
-      settle({
-        host,
-        port,
-        protocol: null,
-        cipher: null,
-        certificate: null,
-        chainDepth: 0,
-        validationAuthorized: false,
-        validationError: null,
-        findings: ['Connection timed out.'],
-        checkedAt,
-        handshakeError: `TLS handshake timed out after ${timeoutMs}ms.`,
-      });
-    }, timeoutMs);
-
     const socket = tls.connect(
       {
         host: connectIp ?? host,
         port,
-        servername: host,
+        ...(isIP(host) ? {} : { servername: host }),
         rejectUnauthorized: false,
         checkServerIdentity: () => undefined,
         ALPNProtocols: ['h2', 'http/1.1'],
@@ -199,6 +191,23 @@ function inspectOne(
         });
       },
     );
+
+    // A synchronous connect failure must not leave a timeout targeting an uninitialized socket.
+    const timer = setTimeout(() => {
+      settle({
+        host,
+        port,
+        protocol: null,
+        cipher: null,
+        certificate: null,
+        chainDepth: 0,
+        validationAuthorized: false,
+        validationError: null,
+        findings: ['Connection timed out.'],
+        checkedAt,
+        handshakeError: `TLS handshake timed out after ${timeoutMs}ms.`,
+      });
+    }, timeoutMs);
 
     socket.on('error', (err) => {
       settle({
