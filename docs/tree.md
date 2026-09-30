@@ -1,6 +1,6 @@
 # attack-surface-mcp-server - Directory Structure
 
-Generated on: 2026-09-22 03:48:28
+Generated on: 2026-09-30 08:40:01
 
 ```text
 attack-surface-mcp-server/
@@ -127,6 +127,7 @@ attack-surface-mcp-server/
 │   ├── clean-mcpb.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
+│   ├── install-otel.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
