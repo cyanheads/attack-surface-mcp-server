@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/attack-surface-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Fattack-surface-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/attack-surface-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/attack-surface-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.1.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Fattack-surface-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/attack-surface-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -37,7 +37,7 @@ Passive external attack-surface mapping (EASM) over Certificate Transparency log
 | `attacksurface_map_domain` | Flagship workflow. Maps a domain's external surface end to end: CT-log subdomain discovery → DNS liveness → (standard+) DNS records, TLS posture, HTTP headers/tech → optional RDAP/WHOIS → (thorough + key) per-IP Shodan enrichment. Returns a structured surface map and a defensive assessment of observable facts. |
 | `attacksurface_enumerate_subdomains` | Passive subdomain discovery from Certificate Transparency logs (crt.sh → Certspotter → TLS-SAN fallback chain), with DNS resolution to mark which names are live. Per-source provenance; no DNS brute-forcing. |
 | `attacksurface_resolve_dns` | Resolve and enumerate DNS records (A/AAAA/CNAME/MX/NS/TXT/CAA) for one or more hosts across multiple public resolvers, with optional reverse DNS (PTR). Per-resolver values surface propagation gaps. |
-| `attacksurface_inspect_tls` | Inspect TLS/SSL posture via a real read-only handshake: protocol, cipher, full certificate chain, SANs, validity window, days-to-expiry, issuer, validation status. Reports invalid/expired/self-signed certs instead of failing. |
+| `attacksurface_inspect_tls` | Inspect TLS/SSL posture via a real read-only handshake: protocol, cipher, leaf certificate and chain depth, SANs, validity window, days-to-expiry, issuer, validation status. Reports invalid/expired/self-signed certs instead of failing. |
 | `attacksurface_probe_http` | Passive HTTP(S) probe: one GET following redirects. Returns status, redirect chain, headers, a security-header audit (HSTS/CSP/X-Frame-Options/cookie flags/CORS reflection), and an evidence-bound technology fingerprint. |
 | `attacksurface_lookup_registration` | Registration and ownership lookup via RDAP (JSON; WHOIS fallback). A domain returns registrar, status, lifecycle events, nameservers, DNSSEC; an IP/CIDR returns netblock, allocation CIDRs, origin ASN, country. |
 | `attacksurface_lookup_host` | Infrastructure intelligence for a single IP (open ports, banners, software versions, ASN, geo) or a faceted internet-wide search, via Shodan. **Requires `SHODAN_API_KEY`** — returns a typed `source_unavailable` error when unset; the rest of the server is unaffected. |
@@ -55,86 +55,69 @@ All resource data is also reachable via tools — tool-only clients lose nothing
 
 ### `attacksurface_map_domain` <sub>tool</sub>
 
-- `depth` control: `quick` = subdomains + liveness only; `standard` = + DNS records, TLS, and HTTP posture; `thorough` = + Shodan enrichment (when a key is present, otherwise skipped with a note)
-- `includeRegistration` adds an RDAP/WHOIS lookup for the apex at standard+ depth
-- All per-host fan-out uses `Promise.allSettled` — one failed source or unreachable host degrades to a note, never tanks the call
-- Subdomain resolution is capped (`ATTACKSURFACE_MAX_SUBDOMAINS`, default 200) with the cap disclosed when hit
-- The `assessment` block synthesizes only observable facts — expiring certs, missing HSTS/CSP, weak TLS versions, failed chain validation — never an exploitation path
+- `depth`: `quick` discovers subdomains and liveness; `standard` adds DNS records, TLS, and HTTP posture; `thorough` adds per-IP Shodan data when a key is present, otherwise a note.
+- Returns a structured surface map and defensive `assessment` of observable facts. Failed sources or unreachable hosts become notes; subdomain resolution is capped by `ATTACKSURFACE_MAX_SUBDOMAINS` (default 200), with truncation disclosed.
+- `includeRegistration` adds RDAP/WHOIS data for the apex at standard or thorough depth.
 
 ---
 
 ### `attacksurface_enumerate_subdomains` <sub>tool</sub>
 
-- Three sources with a fallback chain: crt.sh (primary), Certspotter (fallback — crt.sh is frequently overloaded), and the apex's own TLS certificate SAN list (always available)
-- Every discovered name carries its source provenance
-- DNS resolution marks which names are live; `includeUnresolved: false` returns only live hosts
-- Reads public logs — it does not brute-force or probe the target's resolvers
+- Discovers names through crt.sh → Certspotter → the apex TLS certificate SANs, then resolves DNS liveness. `includeUnresolved: false` keeps only live hosts.
+- Returns each name's source provenance and per-source status; no DNS brute-forcing or target-resolver probing.
 
 ---
 
 ### `attacksurface_resolve_dns` <sub>tool</sub>
 
-- Up to 50 hosts per call; queries A, AAAA, CNAME, MX, NS, TXT, and CAA across multiple public resolvers (default `8.8.8.8`, `1.1.1.1`, `9.9.9.9`)
-- Reports per-resolver answers so propagation gaps and split-horizon DNS are visible
-- Optional reverse DNS (PTR) on resolved addresses
-- Each host and resolver IP passes the SSRF guard; a private/loopback resolver IP is rejected as a typed `blocked_resolver` error; one failing host degrades to a per-host error
+- Accepts up to 50 hosts and queries A, AAAA, CNAME, MX, NS, TXT, and CAA across public resolvers (default `8.8.8.8`, `1.1.1.1`, `9.9.9.9`); reverse DNS (PTR) is optional.
+- Returns per-resolver answers to expose propagation gaps. Private or loopback resolver IPs produce `blocked_resolver`; an individual host failure becomes a per-host error.
+- Canonical records come from the first configured resolver. Resolver failures (including SERVFAIL) remain in `queryError` and `hostError` alongside any successful records; absent records are error-free.
 
 ---
 
 ### `attacksurface_inspect_tls` <sub>tool</sub>
 
-- Up to 50 hosts per call; port defaults to 443, handshake timeout defaults to 8000ms (1000–30000ms range)
-- A real handshake per host reports negotiated protocol and cipher, the full certificate chain, SANs, validity window, days-to-expiry, issuer, and chain-validation status
-- Invalid, expired, and self-signed certificates are inspected and reported rather than throwing
-- Posture findings flag short expiry windows, deprecated protocols, and self-signed chains
-- One handshake per host; no application data is sent; SSRF-guarded
+- Accepts up to 50 hosts; port defaults to 443 and handshake timeout to 8000ms (1000–30000ms).
+- Returns negotiated protocol, cipher, leaf certificate and chain depth, SANs, issuer, validity window, days to expiry, and validation status. Invalid, expired, and self-signed certificates are reported; one host failure becomes a per-host error.
+- Unparseable validity bounds retain their raw values and add findings. `daysUntilExpiry` is null only when expiry cannot be parsed; a malformed start date does not erase a known expiry.
 
 ---
 
 ### `attacksurface_probe_http` <sub>tool</sub>
 
-- One `http(s)://` URL per call; timeout defaults to 10000ms (1000–30000ms range)
-- Follows redirects and reports the final status plus the full redirect chain
-- Security-header audit: HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy, cookie Secure/HttpOnly/SameSite flags, and CORS origin-reflection
-- Evidence-bound technology fingerprint (server, framework, CDN, WAF, CMS) — every detection names the header or body marker that triggered it
-- Strictly one request per host — no path traversal, parameter injection, or multi-method probing; every redirect hop is re-checked against the SSRF guard, surfaced as a typed `blocked_target` error
+- Accepts one HTTP(S) URL; timeout defaults to 10000ms (1000–30000ms). Follows up to ten redirects with an SSRF check at every hop; a refused target produces `blocked_target`. Another redirect at the limit returns `finalStatus: 0` and a `transportError`.
+- Returns status, redirect chain, headers, security-header findings (HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy, cookie flags, CORS reflection), and technology detections with their triggering evidence.
+- Cloudflare server banners identify a CDN; AWS ELB banners identify edge infrastructure (`other`). Neither banner alone establishes WAF protection.
 
 ---
 
 ### `attacksurface_lookup_registration` <sub>tool</sub>
 
-- `target` accepts a domain, IP, or CIDR; `type` (`auto` / `domain` / `ip`) forces interpretation or lets it auto-detect
-- RDAP first (structured JSON), WHOIS port-43 fallback for TLDs without RDAP or when a hop is unresponsive
-- Domain lookups return registrar, EPP status codes, registration/expiry/updated events, nameservers, and DNSSEC
-- IP/CIDR lookups return the netblock name, allocation CIDRs, origin ASN, and country
-- Registry data is frequently redacted or sparse — absent fields are reported as unknown, never inferred
+- Accepts a domain, IP, or CIDR; `type` (`auto` / `domain` / `ip`) controls interpretation. Uses RDAP first, then WHOIS port 43 when needed.
+- Domain results include registrar, EPP statuses, lifecycle events, nameservers, and DNSSEC; IP/CIDR results include netblock, allocation CIDRs, ASN, and country. Sparse or redacted fields stay unknown.
 
 ---
 
 ### `attacksurface_lookup_host` <sub>tool</sub>
 
-- `mode: "host"` (default) — a free single-IP lookup: open ports, service banners, software versions, hostnames, ASN, geo
-- `mode: "search"` — a faceted internet-wide query (optional `facets`) that consumes paid Shodan query credits
-- Requires `SHODAN_API_KEY`; without it the tool returns a typed `source_unavailable` error and every other tool keeps working
-- No Shodan data for the target IP returns a typed `no_data` error rather than an empty result
-- Shodan data reflects Shodan's last scan, not a live port state — the server itself never scans ports
+- `mode: "host"` (default) looks up one IP; `mode: "search"` accepts an internet-wide query with optional `facets` and may consume Shodan query credits. Requires `SHODAN_API_KEY`.
+- Both modes reject blank targets. Host mode accepts bare IPv4/IPv6 addresses and returns `invalid_target` for other syntax before contacting Shodan; search queries are preserved verbatim.
+- Returns ports, banners, software versions, hostnames, ASN, and geography from Shodan's last scan. Missing credentials produce `source_unavailable`; no host data produces `no_data`. The server performs no port scans.
 
 ---
 
 ### `attacksurface_recon_guidance` <sub>tool</sub>
 
-- Takes the findings gathered so far (live hosts, TLS/cert state, missing headers, software versions, open ports) and returns a prioritized defensive review plan as markdown plus structured priority items
-- Pre-fills concrete follow-up calls — re-inspecting hosts that lack posture data, and chaining disclosed software versions to an external NVD (`nist-nvd-mcp-server`) or OSV (`osv-advisory-mcp-server`) server for CVE context
-- `topic` (`triage` / `posture` / `coverage`) shapes plan emphasis; output is a remediation/visibility plan, never an exploitation playbook
-- Read-only — no network calls, just reasoning over the supplied state
+- Takes prior findings (hosts, certificates, missing headers, software versions, ports); `topic` (`triage` / `posture` / `coverage`) selects the plan's emphasis.
+- Returns markdown guidance, structured priority items, and pre-filled follow-up calls, including external NVD/OSV lookups. Runs offline and produces a defensive remediation or visibility plan.
 
 ---
 
 ### `attacksurface://surface/{domain}` <sub>resource</sub>
 
-- Returns `application/json`: subdomain count, live-host count, and a per-host TLS/HTTP posture summary — equivalent to a standard-depth `attacksurface_map_domain` call
-- Host detail is capped at 50 live hosts; beyond that the response discloses an omitted count and points to `attacksurface_map_domain` for the full set
-- Read-only snapshot; the same data is fully reachable via tools
+- Takes a domain and returns an `application/json` snapshot equivalent to a standard-depth `attacksurface_map_domain` call.
+- Includes subdomain and live-host counts plus per-host TLS/HTTP posture. Caps host detail at 50 live hosts, discloses omissions, and points to `attacksurface_map_domain` for the full set.
 
 ## Features
 
@@ -214,8 +197,6 @@ For Streamable HTTP, set the transport and start the server:
 MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 # Server listens at http://localhost:3010/mcp
 ```
-
-Refer to "your MCP client configuration file" generically — different clients use different config paths and this server isn't client-specific.
 
 ### Prerequisites
 
