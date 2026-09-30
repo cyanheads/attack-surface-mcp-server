@@ -27,7 +27,9 @@ const ResolverResultSchema = z
     queryError: z
       .string()
       .nullable()
-      .describe('Resolver-level error, or null when the query succeeded.'),
+      .describe(
+        'First resolver failure, including SERVFAIL or timeout; null for successful or absent records.',
+      ),
   })
   .describe("One resolver's answer for a host.");
 
@@ -45,7 +47,9 @@ const HostResultSchema = z
     resolved: z.boolean().describe('True when the host resolved to at least one A/AAAA address.'),
     records: z
       .record(z.string(), z.array(z.string()))
-      .describe('Canonical records (from the first resolver that answered), keyed by type.'),
+      .describe(
+        'Canonical records from the first configured resolver, keyed by type, even if its queries failed.',
+      ),
     resolverResults: z.array(ResolverResultSchema).describe('Per-resolver breakdown.'),
     propagationMismatches: z
       .array(RecordTypeEnum)
@@ -54,7 +58,10 @@ const HostResultSchema = z
       .array(ReverseResultSchema)
       .optional()
       .describe('Reverse-DNS (PTR) results for resolved IPs, when reverse was requested.'),
-    hostError: z.string().nullable().describe('Host-level error (e.g. blocked target), or null.'),
+    hostError: z
+      .string()
+      .nullable()
+      .describe('First resolver failure or host-level error (e.g. blocked target), or null.'),
   })
   .describe('Aggregate DNS result for one host across all queried resolvers.');
 
@@ -89,7 +96,7 @@ export const resolveDnsTool = tool('attacksurface_resolve_dns', {
     resolversUsed: z.array(z.string()).describe('Resolver IPs actually queried.'),
   }),
   enrichment: {
-    notice: z.string().optional().describe('Guidance when no host resolved or all hosts errored.'),
+    notice: z.string().optional().describe('Guidance when queries failed or no host resolved.'),
   },
   errors: [
     {
@@ -159,9 +166,13 @@ export const resolveDnsTool = tool('attacksurface_resolve_dns', {
     );
 
     const anyResolved = results.some((r) => r.resolved);
-    if (!anyResolved) {
+    if (results.some((r) => r.hostError)) {
       ctx.enrich.notice(
-        `No host resolved to an address across ${resolvers.length} resolver(s). Verify the hostnames, or the records may not exist.`,
+        'Some DNS lookups failed; successful records are retained. Inspect hostError and queryError. Retry resolver failures with another public resolver; blocked targets require a permitted target.',
+      );
+    } else if (!anyResolved) {
+      ctx.enrich.notice(
+        "No host resolved to an address in the first configured resolver's canonical records. Check the requested record types and per-resolver answers; the hostnames or address records may not exist.",
       );
     }
 

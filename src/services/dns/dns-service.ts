@@ -81,7 +81,7 @@ async function queryResolver(
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
         // NODATA/NOTFOUND/NXDOMAIN are normal "no records of this type" — not a resolver failure.
-        if (code !== 'ENODATA' && code !== 'ENOTFOUND' && code !== 'ESERVFAIL') {
+        if (code !== 'ENODATA' && code !== 'ENOTFOUND') {
           if (!firstError) firstError = (err as Error).message;
         }
       }

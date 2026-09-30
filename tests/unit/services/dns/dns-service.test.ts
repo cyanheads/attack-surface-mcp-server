@@ -176,8 +176,43 @@ describe('DnsService', () => {
     expect(result?.reverse).toBeUndefined();
   });
 
-  // Known defect: https://github.com/cyanheads/attack-surface-mcp-server/issues/3
-  it.skip('surfaces SERVFAIL as a resolver failure rather than a no-record answer', async () => {
+  it.each(['ENODATA', 'ENOTFOUND'])('keeps %s absence error-free', async (code) => {
+    dnsBoundary.query.mockRejectedValue(dnsError(code));
+    const [result] = await new DnsService().resolveHosts(
+      ['example.com'],
+      ['A'],
+      ['8.8.8.8'],
+      false,
+    );
+    expect(result).toMatchObject({
+      records: {},
+      resolved: false,
+      hostError: null,
+      resolverResults: [{ queryError: null }],
+    });
+  });
+
+  it('uses the first configured resolver even when only the second returns addresses', async () => {
+    dnsBoundary.query.mockImplementation(async (_type, _host, resolver) => {
+      if (resolver === '8.8.8.8') throw dnsError('ENODATA');
+      return ['93.184.216.34'];
+    });
+    const [result] = await new DnsService().resolveHosts(
+      ['example.com'],
+      ['A'],
+      ['8.8.8.8', '1.1.1.1'],
+      false,
+    );
+    expect(result).toMatchObject({
+      records: {},
+      resolved: false,
+      hostError: null,
+      propagationMismatches: ['A'],
+      resolverResults: [{ records: {} }, { records: { A: ['93.184.216.34'] } }],
+    });
+  });
+
+  it('surfaces SERVFAIL as a resolver failure rather than a no-record answer', async () => {
     dnsBoundary.query.mockRejectedValue(dnsError('ESERVFAIL', 'upstream SERVFAIL'));
 
     const [result] = await new DnsService().resolveHosts(
@@ -187,8 +222,37 @@ describe('DnsService', () => {
       false,
     );
 
-    expect(result?.error).toBe('upstream SERVFAIL');
-    expect(result?.resolverResults[0]?.error).toBe('upstream SERVFAIL');
+    expect(result?.hostError).toBe('upstream SERVFAIL');
+    expect(result?.resolverResults[0]?.queryError).toBe('upstream SERVFAIL');
+  });
+
+  it('retains mixed records and per-resolver failures without replacing canonical records', async () => {
+    dnsBoundary.query.mockImplementation(async (type, _host, resolver) => {
+      if (resolver === '8.8.8.8' && type === 'AAAA')
+        throw dnsError('ESERVFAIL', 'upstream SERVFAIL');
+      if (type === 'AAAA') return ['2606:4700:4700::1111'];
+      return [resolver === '8.8.8.8' ? '93.184.216.34' : '93.184.216.35'];
+    });
+    const [result] = await new DnsService().resolveHosts(
+      ['example.com'],
+      ['A', 'AAAA'],
+      ['8.8.8.8', '1.1.1.1'],
+      false,
+    );
+    expect(result).toMatchObject({
+      records: { A: ['93.184.216.34'] },
+      resolved: true,
+      hostError: 'upstream SERVFAIL',
+      resolverResults: [
+        { resolver: '8.8.8.8', records: { A: ['93.184.216.34'] }, queryError: 'upstream SERVFAIL' },
+        {
+          resolver: '1.1.1.1',
+          records: { A: ['93.184.216.35'], AAAA: ['2606:4700:4700::1111'] },
+          queryError: null,
+        },
+      ],
+    });
+    expect(result?.records.AAAA).toBeUndefined();
   });
 
   it('degrades a host that resolves to a private address without querying it', async () => {

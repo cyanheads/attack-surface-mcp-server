@@ -3,7 +3,7 @@
  * @module tests/integration/resolve-dns.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const dnsBoundary = vi.hoisted(() => ({ lookup: vi.fn(), query: vi.fn(), reverse: vi.fn() }));
@@ -176,5 +176,30 @@ describe('attacksurface_resolve_dns', () => {
     expect(getEnrichment(ctx)).toEqual({
       notice: expect.stringContaining('No host resolved'),
     });
+  });
+
+  it('exposes resolver failure and retry guidance on both output paths', async () => {
+    dnsBoundary.query.mockRejectedValue(
+      Object.assign(new Error('upstream SERVFAIL'), { code: 'ESERVFAIL' }),
+    );
+    const result = await runToolContract(resolveDnsTool, {
+      hosts: ['example.com'],
+      recordTypes: ['A'],
+      resolvers: ['8.8.8.8'],
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      results: [
+        {
+          resolved: false,
+          hostError: 'upstream SERVFAIL',
+          resolverResults: [{ queryError: 'upstream SERVFAIL' }],
+        },
+      ],
+    });
+    const text = JSON.stringify(result.content);
+    expect(text).toContain('upstream SERVFAIL');
+    expect(text).toContain('Retry');
+    expect(text).not.toContain('records may not exist');
   });
 });
