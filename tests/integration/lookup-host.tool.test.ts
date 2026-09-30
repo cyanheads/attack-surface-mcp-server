@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
 import { lookupHostTool } from '@/mcp-server/tools/definitions/lookup-host.tool.js';
@@ -153,12 +153,78 @@ describe('attacksurface_lookup_host', () => {
     ).toBe(false);
   });
 
-  // Known defect: https://github.com/cyanheads/attack-surface-mcp-server/issues/6
-  it.skip('rejects empty and non-IP host-mode targets before network I/O', () => {
-    expect(lookupHostTool.input.safeParse({ target: '', mode: 'host' }).success).toBe(false);
-    expect(lookupHostTool.input.safeParse({ target: 'not-an-ip', mode: 'host' }).success).toBe(
-      false,
-    );
+  it.each([
+    '8.8.8.8',
+    '2606:4700:4700::1111',
+    '2606:4700:4700:0000:0000:0000:0000:1111',
+    '::ffff:8.8.8.8',
+  ])('preserves host lookup for %s on both output paths', async (target) => {
+    fetchMock.mockImplementation(async () => Response.json({ ip_str: target }));
+    const result = await runToolContract(lookupHostTool, { target });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toEqual({
+      mode: 'host',
+      host: { ip: target, hostnames: [], ports: [], services: [] },
+    });
+    expect(JSON.stringify(result.content)).toContain(target);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toContain(encodeURIComponent(target));
+  });
+
+  it('preserves search syntax verbatim and renders empty results', async () => {
+    const target = '  org:"Example Org" port:443  ';
+    fetchMock.mockResolvedValue(Response.json({ total: 0, matches: [], facets: {} }));
+    const result = await runToolContract(lookupHostTool, { target, mode: 'search' });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toEqual({
+      mode: 'search',
+      search: { total: 0, matches: [], facets: {} },
+    });
+    expect(JSON.stringify(result.content)).toContain('0 total match(es)');
+    expect(new URL(String(fetchMock.mock.calls[0]?.[0])).searchParams.get('query')).toBe(target);
+  });
+
+  it.each(['', ' ', '\t\n'])(
+    'rejects blank target %j at the schema in either mode',
+    async (target) => {
+      fetchMock.mockImplementation(async () => Response.json({}));
+      for (const mode of ['host', 'search']) {
+        const result = await runToolContract(lookupHostTool, { target, mode });
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          error: { code: JsonRpcErrorCode.InvalidParams },
+        });
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    'not-an-ip',
+    'example.com',
+    'https://8.8.8.8',
+    '8.8.8.0/24',
+    '8.8.8.8:443',
+    '[2606:4700:4700::1111]',
+    '999.1.1.1',
+    '1.2.3',
+    '2001:::1',
+  ])('rejects non-IP target %s with actionable errors and zero requests', async (target) => {
+    fetchMock.mockImplementation(async () => Response.json({}));
+    const result = await runToolContract(lookupHostTool, { target });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'invalid_target',
+          recovery: { hint: expect.stringContaining('IPv4 or IPv6') },
+        },
+      },
+    });
+    expect(JSON.stringify(result.content)).toContain('IPv4 or IPv6');
+    expect(JSON.stringify(result.content)).toContain('invalid_target');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('returns the typed source_unavailable envelope when the key is absent', async () => {

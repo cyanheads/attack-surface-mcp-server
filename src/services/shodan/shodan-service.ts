@@ -1,7 +1,7 @@
 /**
  * @fileoverview Shodan service — optional-key host intelligence and faceted search. Single-host
- * lookups use the free `/shodan/host/{ip}` endpoint; faceted search uses `/shodan/host/search`
- * (consumes paid query credits). When `SHODAN_API_KEY` is absent the service reports
+ * lookups use `/shodan/host/{ip}`; faceted search uses `/shodan/host/search`
+ * (may consume query credits). When `SHODAN_API_KEY` is absent the service reports
  * `isConfigured() === false` so the one calling tool can degrade with a typed `source_unavailable`
  * error while the rest of the server stays fully functional. Shodan data is as fresh as Shodan's
  * last scan — never presented as a live port state (this server never scans ports itself).
@@ -63,7 +63,7 @@ export class ShodanService {
     return Boolean(this.config.shodanApiKey);
   }
 
-  /** Single-host lookup via the free host endpoint. Caller must check `isConfigured()` first. */
+  /** Single-host lookup. Caller must check `isConfigured()` first. */
   async lookupHost(ip: string, ctx: Context): Promise<ShodanHostResult> {
     const key = this.requireKey();
     const url = `${BASE_URL}/shodan/host/${encodeURIComponent(ip)}?key=${encodeURIComponent(key)}`;
@@ -91,7 +91,7 @@ export class ShodanService {
     };
   }
 
-  /** Faceted internet-wide search (consumes paid query credits). */
+  /** Faceted internet-wide search (may consume query credits). */
   async search(query: string, facets: string[], ctx: Context): Promise<ShodanSearchResult> {
     const key = this.requireKey();
     const params = new URLSearchParams({ key, query });

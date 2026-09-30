@@ -1,12 +1,13 @@
 /**
  * @fileoverview attacksurface_lookup_host — infrastructure intelligence for a single IP or a faceted
- * internet-wide search, powered by Shodan. Single-host lookup uses the free host endpoint; faceted
- * search (mode: "search") consumes paid query credits. Requires SHODAN_API_KEY — degrades with a
+ * internet-wide search, powered by Shodan. Single-host lookup returns host records; faceted
+ * search (mode: "search") may consume query credits. Requires SHODAN_API_KEY — degrades with a
  * typed `source_unavailable` error when unset, leaving the rest of the server fully functional.
  * Shodan data is as fresh as Shodan's last scan, never a live port state.
  * @module mcp-server/tools/definitions/lookup-host.tool
  */
 
+import { isIP } from 'node:net';
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getShodanService } from '@/services/shodan/shodan-service.js';
@@ -63,20 +64,19 @@ const SearchResultSchema = z.object({
 export const lookupHostTool = tool('attacksurface_lookup_host', {
   title: 'attacksurface_lookup_host',
   description:
-    'Get infrastructure intelligence for a single IP (open ports, service banners, software versions, hostnames, ASN, geo) via Shodan\'s free host endpoint, or run a faceted internet-wide search (mode: "search") that consumes paid Shodan query credits. Requires SHODAN_API_KEY; without it this tool returns a typed source_unavailable error while the rest of the server keeps working. Shodan data reflects Shodan\'s last scan, not a live port state. Use only on assets you own or are authorized to assess.',
+    'Get infrastructure intelligence for a single IP (open ports, service banners, software versions, hostnames, ASN, geo) via Shodan, or run a faceted internet-wide search (mode: "search") that may consume Shodan query credits. Requires SHODAN_API_KEY; without it this tool returns a typed source_unavailable error while the rest of the server keeps working. Shodan data reflects Shodan\'s last scan, not a live port state. Use only on assets you own or are authorized to assess.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     target: z
       .string()
+      .regex(/\S/, 'Target must contain a non-whitespace character.')
       .describe(
         'For mode "host": an IP address. For mode "search": a Shodan search query (e.g. "org:\\"Example Inc\\" port:443").',
       ),
     mode: z
       .enum(['host', 'search'])
       .default('host')
-      .describe(
-        '"host" = free single-IP lookup; "search" = faceted query (consumes paid credits).',
-      ),
+      .describe('"host" = single-IP lookup; "search" = faceted query (may consume query credits).'),
     facets: z
       .array(z.string())
       .optional()
@@ -90,6 +90,13 @@ export const lookupHostTool = tool('attacksurface_lookup_host', {
     ),
   }),
   errors: [
+    {
+      reason: 'invalid_target',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A host-mode target is not an IPv4 or IPv6 address.',
+      recovery:
+        'Provide a bare IPv4 or IPv6 address without brackets, a port, or a CIDR suffix; use mode "search" for Shodan queries.',
+    },
     {
       reason: 'source_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
@@ -109,6 +116,9 @@ export const lookupHostTool = tool('attacksurface_lookup_host', {
   ],
 
   async handler(input, ctx) {
+    if (input.mode === 'host' && !isIP(input.target)) {
+      throw ctx.fail('invalid_target', `"${input.target}" is not a valid IPv4 or IPv6 address.`);
+    }
     const shodan = getShodanService();
     if (!shodan.isConfigured()) {
       throw ctx.fail('source_unavailable', undefined, { ...ctx.recoveryFor('source_unavailable') });
