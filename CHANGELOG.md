@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.3](changelog/0.2.x/0.2.3.md) — 2026-09-30 · 🛡️ Security
+
+SERVFAIL answers, redirect loops, and unparseable certificate dates are reported as failures or unknowns instead of empty or successful results, and a TLS inspection of an IP-literal host no longer leaves a timer that ends the server process.
+
 ## [0.2.2](changelog/0.2.x/0.2.2.md) — 2026-09-21
 
 Defaults HTTP sessions to stateless, pins dual-stack TLS/WHOIS connections to IPv4, and adopts mcp-ts-core 0.13.6.
