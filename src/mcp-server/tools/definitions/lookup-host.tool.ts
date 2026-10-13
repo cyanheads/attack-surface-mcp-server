@@ -11,6 +11,7 @@ import { isIP } from 'node:net';
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getShodanService } from '@/services/shodan/shodan-service.js';
+import { literalText } from '@/utils/literal-text.js';
 
 const ServiceBannerSchema = z
   .object({
@@ -147,17 +148,17 @@ export const lookupHostTool = tool('attacksurface_lookup_host', {
 
     const h = result.host;
     if (h) {
-      lines.push(`### Host: ${h.ip}`);
+      lines.push(`### Host: ${literalText(h.ip)}`);
       lines.push(
-        `**Org:** ${h.org ?? 'unknown'} | **ASN:** ${h.asn ?? 'unknown'} | **Country:** ${h.country ?? 'unknown'}`,
+        `**Org:** ${literalText(h.org ?? 'unknown')} | **ASN:** ${literalText(h.asn ?? 'unknown')} | **Country:** ${literalText(h.country ?? 'unknown')}`,
       );
-      lines.push(`**Hostnames:** ${h.hostnames.join(', ') || 'none'}`);
-      lines.push(`**Last Shodan scan:** ${h.lastUpdate ?? 'unknown'}`);
+      lines.push(`**Hostnames:** ${h.hostnames.map(literalText).join(', ') || 'none'}`);
+      lines.push(`**Last Shodan scan:** ${literalText(h.lastUpdate ?? 'unknown')}`);
       lines.push(`**Open ports:** ${h.ports.join(', ') || 'none reported'}`);
       lines.push('**Services:**');
       for (const s of h.services) {
         lines.push(
-          `- port ${s.port} · ${s.transport ?? 'tcp'} · ${s.product ?? 'unknown'} ${s.version ?? ''} · seen ${s.observedAt ?? 'unknown'} · ${s.banner ?? 'no banner'}`,
+          `- port ${s.port} · ${literalText(s.transport ?? 'tcp')} · ${literalText(s.product ?? 'unknown')} ${s.version === undefined ? '' : literalText(s.version)} · seen ${literalText(s.observedAt ?? 'unknown')} · ${literalText(s.banner ?? 'no banner')}`,
         );
       }
     }
@@ -167,12 +168,14 @@ export const lookupHostTool = tool('attacksurface_lookup_host', {
       lines.push(`### Search — ${sr.total} total match(es)`);
       for (const m of sr.matches) {
         lines.push(
-          `- ${m.ip}:${m.port} — ${m.product ?? 'unknown product'} · ${m.org ?? 'unknown org'} · ${m.country ?? 'unknown country'}`,
+          `- ${literalText(`${m.ip}:${m.port}`)} — ${literalText(m.product ?? 'unknown product')} · ${literalText(m.org ?? 'unknown org')} · ${literalText(m.country ?? 'unknown country')}`,
         );
       }
       lines.push('**Facets:**');
       for (const [name, buckets] of Object.entries(sr.facets)) {
-        lines.push(`- ${name}: ${buckets.map((b) => `${b.value} (${b.count})`).join(', ')}`);
+        lines.push(
+          `- ${literalText(name)}: ${buckets.map((b) => `${literalText(b.value)} (${b.count})`).join(', ')}`,
+        );
       }
     }
     return [{ type: 'text', text: lines.join('\n') }];

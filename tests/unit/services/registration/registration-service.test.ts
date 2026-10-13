@@ -4,6 +4,7 @@
  */
 
 import { EventEmitter } from 'node:events';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
@@ -267,10 +268,13 @@ describe('RegistrationService', () => {
     fetchMock.mockImplementation((_input, init) =>
       delayedResponse(Response.json({}), 60_000, init?.signal),
     );
-    netBoundary.scenarios.push({
-      mode: 'success',
-      chunks: ['Registrar: WHOIS fallback\n'],
-    });
+    netBoundary.scenarios.push(
+      { mode: 'success', chunks: ['refer: whois.registry.test\n'] },
+      {
+        mode: 'success',
+        chunks: ['Registrar: WHOIS fallback\n'],
+      },
+    );
 
     const pending = new RegistrationService(config).lookup(
       'example.com',
@@ -291,10 +295,13 @@ describe('RegistrationService', () => {
       delayedResponse(Response.json({}), 6_000, signal).then(() => undefined),
     );
     fetchMock.mockResolvedValue(Response.json({ status: ['active'] }));
-    netBoundary.scenarios.push({
-      mode: 'success',
-      chunks: ['Registrar: WHOIS fallback\n'],
-    });
+    netBoundary.scenarios.push(
+      { mode: 'success', chunks: ['refer: whois.registry.test\n'] },
+      {
+        mode: 'success',
+        chunks: ['Registrar: WHOIS fallback\n'],
+      },
+    );
 
     const pending = new RegistrationService(config).lookup(
       'example.com',
@@ -379,13 +386,16 @@ describe('RegistrationService', () => {
 
   it('parses IP WHOIS fields and tolerates truncated text', async () => {
     fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
-    netBoundary.scenarios.push({
-      mode: 'success',
-      chunks: [
-        'NetName: EXAMPLE-NET\nCIDR: 8.8.8.0/24\nroute: 8.8.8.0/24\n',
-        'OriginAS: AS15169\norigin: 15169\nCountry: us\ntruncated-tail-without-colon',
-      ],
-    });
+    netBoundary.scenarios.push(
+      { mode: 'success', chunks: ['refer: whois.registry.test\n'] },
+      {
+        mode: 'success',
+        chunks: [
+          'NetName: EXAMPLE-NET\nCIDR: 8.8.8.0/24\nroute: 8.8.8.0/24\n',
+          'OriginAS: AS15169\norigin: 15169\nCountry: us\ntruncated-tail-without-colon',
+        ],
+      },
+    );
 
     const result = await new RegistrationService(config).lookup(
       '8.8.8.8',
@@ -407,15 +417,18 @@ describe('RegistrationService', () => {
 
   it('does not let whitespace-only IP WHOIS fields consume later CRLF records', async () => {
     fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
-    netBoundary.scenarios.push({
-      mode: 'success',
-      chunks: [
-        'NetName: \t \r\nNetName: EXAMPLE-NET\r\n',
-        'CIDR: \t \r\nCIDR: 192.0.2.0/24\r\n',
-        'OriginAS: \t \r\nOriginAS: AS1\r\n',
-        'Country: \t \r\nCountry: AA\r\n',
-      ],
-    });
+    netBoundary.scenarios.push(
+      { mode: 'success', chunks: ['refer: whois.registry.test\n'] },
+      {
+        mode: 'success',
+        chunks: [
+          'NetName: \t \r\nNetName: EXAMPLE-NET\r\n',
+          'CIDR: \t \r\nCIDR: 192.0.2.0/24\r\n',
+          'OriginAS: \t \r\nOriginAS: AS1\r\n',
+          'Country: \t \r\nCountry: AA\r\n',
+        ],
+      },
+    );
 
     const result = await new RegistrationService(config).lookup(
       '192.0.2.1',
@@ -437,18 +450,21 @@ describe('RegistrationService', () => {
 
   it('does not let whitespace-only domain WHOIS fields consume later CRLF records', async () => {
     fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
-    netBoundary.scenarios.push({
-      mode: 'success',
-      chunks: [
-        'Registrar: \t \r\nRegistrar: Example Registrar\r\n',
-        'Domain Status: \t \r\nDomain Status: active\r\n',
-        'Creation Date: \t \r\nCreation Date: 1995-08-14T04:00:00Z\r\n',
-        'Registry Expiry Date: \t \r\nRegistry Expiry Date: 2030-08-13T04:00:00Z\r\n',
-        'Updated Date: \t \r\nUpdated Date: 2025-01-01T00:00:00Z\r\n',
-        'Name Server: \t \r\nName Server: NS1.EXAMPLE.COM\r\n',
-        'DNSSEC: \t \r\nDNSSEC: signedDelegation\r\n',
-      ],
-    });
+    netBoundary.scenarios.push(
+      { mode: 'success', chunks: ['refer: whois.registry.test\n'] },
+      {
+        mode: 'success',
+        chunks: [
+          'Registrar: \t \r\nRegistrar: Example Registrar\r\n',
+          'Domain Status: \t \r\nDomain Status: active\r\n',
+          'Creation Date: \t \r\nCreation Date: 1995-08-14T04:00:00Z\r\n',
+          'Registry Expiry Date: \t \r\nRegistry Expiry Date: 2030-08-13T04:00:00Z\r\n',
+          'Updated Date: \t \r\nUpdated Date: 2025-01-01T00:00:00Z\r\n',
+          'Name Server: \t \r\nName Server: NS1.EXAMPLE.COM\r\n',
+          'DNSSEC: \t \r\nDNSSEC: signedDelegation\r\n',
+        ],
+      },
+    );
 
     const result = await new RegistrationService(config).lookup(
       'example.com',
@@ -485,5 +501,147 @@ describe('RegistrationService', () => {
     await vi.advanceTimersByTimeAsync(8_000);
 
     await rejection;
+  });
+
+  it.each([
+    'No match for "EXAMPLE.COM".',
+    'NOT FOUND',
+    '% No entries found',
+    'No Data Found',
+    'No Object Found',
+    'No such domain',
+  ])('rejects authoritative no-match: %s', async (text) => {
+    fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
+    netBoundary.scenarios.push(
+      { mode: 'success', chunks: ['refer: whois.registry.test\n'] },
+      { mode: 'success', chunks: [text] },
+    );
+    await expect(
+      new RegistrationService(config).lookup('example.com', 'domain', createMockContext()),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound, data: { reason: 'no_match' } });
+  });
+
+  it.each(['', 'unrecognized registry error'])(
+    'rejects empty/unrecognized authoritative text %j',
+    async (text) => {
+      fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
+      netBoundary.scenarios.push(
+        {
+          mode: 'success',
+          chunks: ['refer: whois.registry.test\nstatus: ACTIVE\nnserver: TLD.NS\n'],
+        },
+        { mode: 'success', chunks: [text] },
+      );
+      await expect(
+        new RegistrationService(config).lookup('example.com', 'domain', createMockContext()),
+      ).rejects.toMatchObject({ data: { reason: 'source_unavailable' } });
+    },
+  );
+
+  it('preserves authoritative referral transport failure as cause', async () => {
+    const cause = new Error('registry disconnected');
+    fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
+    netBoundary.scenarios.push(
+      { mode: 'success', chunks: ['refer: whois.registry.test\nstatus: ACTIVE\n'] },
+      { mode: 'error', error: cause },
+    );
+    await expect(
+      new RegistrationService(config).lookup('example.com', 'domain', createMockContext()),
+    ).rejects.toMatchObject({ cause, data: { reason: 'source_unavailable' } });
+  });
+
+  it('refuses IANA data without an authoritative referral', async () => {
+    fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
+    netBoundary.scenarios.push({
+      mode: 'success',
+      chunks: ['domain: COM\nstatus: ACTIVE\nnserver: TLD.NS\n'],
+    });
+    await expect(
+      new RegistrationService(config).lookup('example.com', 'domain', createMockContext()),
+    ).rejects.toMatchObject({ data: { reason: 'source_unavailable' } });
+  });
+
+  it('accepts target-identity-only authoritative text', async () => {
+    fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
+    netBoundary.scenarios.push(
+      { mode: 'success', chunks: ['refer: whois.registry.test\n'] },
+      { mode: 'success', chunks: ['Domain Name: EXAMPLE.COM\n'] },
+    );
+    await expect(
+      new RegistrationService(config).lookup('example.com', 'domain', createMockContext()),
+    ).resolves.toMatchObject({
+      source: 'whois',
+      registration: { target: 'example.com', statuses: [], events: [], nameservers: [] },
+    });
+  });
+
+  it('accepts indentation on sparse authoritative identity fields', async () => {
+    fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
+    netBoundary.scenarios.push(
+      { mode: 'success', chunks: ['refer: whois.registry.test\n'] },
+      { mode: 'success', chunks: [' \tDomain Name: EXAMPLE.COM\r\n'] },
+    );
+    await expect(
+      new RegistrationService(config).lookup('example.com', 'domain', createMockContext()),
+    ).resolves.toMatchObject({ source: 'whois', registration: { target: 'example.com' } });
+  });
+
+  it('does not mistake a registrar containing No Match for an explicit negative', async () => {
+    fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
+    netBoundary.scenarios.push(
+      { mode: 'success', chunks: ['refer: whois.registry.test\n'] },
+      { mode: 'success', chunks: ['Registrar: No Match Registrar\n'] },
+    );
+    await expect(
+      new RegistrationService(config).lookup('example.com', 'domain', createMockContext()),
+    ).resolves.toMatchObject({ registration: { registrar: 'No Match Registrar' } });
+  });
+
+  it('propagates cancellation during the authoritative WHOIS query and removes listeners', async () => {
+    const controller = new AbortController();
+    const remove = vi.spyOn(controller.signal, 'removeEventListener');
+    fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
+    netBoundary.scenarios.push(
+      { mode: 'success', chunks: ['refer: whois.registry.test\n'] },
+      { mode: 'timeout' },
+    );
+    const pending = new RegistrationService(config).lookup(
+      'example.com',
+      'domain',
+      createMockContext({ signal: controller.signal }),
+    );
+    await vi.waitFor(() => expect(netBoundary.createConnection).toHaveBeenCalledTimes(2));
+    controller.abort(new DOMException('Caller cancelled', 'AbortError'));
+    await expect(pending).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'Caller cancelled',
+    });
+    expect(remove).toHaveBeenCalledWith('abort', expect.any(Function));
+    expect(netBoundary.createConnection).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['inetnum: 8.8.8.0 - 8.8.8.255', ['8.8.8.0/24']],
+    ['inetnum: 8.8.8.1 - 8.8.8.6', ['8.8.8.1/32', '8.8.8.2/31', '8.8.8.4/31', '8.8.8.6/32']],
+    ['inet6num: 2001:4860::/32', ['2001:4860::/32']],
+    [
+      'route6: 2001:4860::1 - 2001:4860::6',
+      ['2001:4860::1/128', '2001:4860::2/127', '2001:4860::4/127', '2001:4860::6/128'],
+    ],
+    ['CIDR: 8.8.8.3/24, 8.8.8.0/24\nroute: 8.8.8.0/24', ['8.8.8.0/24']],
+    ['inetnum: 8.8.8.6 - 8.8.8.1\nroute: 8.8.8.8/24oops\ninet6num: 2001:: - 8.8.8.8', []],
+  ])('normalizes WHOIS allocations: %s', async (allocation, cidrs) => {
+    fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
+    netBoundary.scenarios.push(
+      { mode: 'success', chunks: ['refer: whois.registry.test\n'] },
+      { mode: 'success', chunks: [`NetName: allocation\n${allocation}`] },
+    );
+    const result = await new RegistrationService(config).lookup(
+      '8.8.8.8',
+      'ip',
+      createMockContext(),
+    );
+    expect(result.registration).toMatchObject({ cidrs });
+    expect(result.rawWhois).toContain(allocation);
   });
 });

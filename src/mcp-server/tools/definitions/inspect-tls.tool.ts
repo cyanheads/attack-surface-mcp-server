@@ -9,6 +9,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getTlsService } from '@/services/tls/tls-service.js';
+import { literalText } from '@/utils/literal-text.js';
 import { isValidHost } from '@/utils/validation.js';
 
 const CertInfoSchema = z
@@ -134,29 +135,31 @@ export const inspectTlsTool = tool('attacksurface_inspect_tls', {
   format: (result) => {
     const lines: string[] = [];
     for (const r of result.results) {
-      lines.push(`## ${r.host}:${r.port}`);
-      lines.push(`**Error:** ${r.handshakeError ?? 'none'}`);
-      lines.push(`**Protocol:** ${r.protocol ?? 'unknown'} | **Cipher:** ${r.cipher ?? 'unknown'}`);
+      lines.push(`## ${literalText(`${r.host}:${r.port}`)}`);
+      lines.push(`**Error:** ${literalText(r.handshakeError ?? 'none')}`);
       lines.push(
-        `**Validation:** ${r.validationAuthorized ? 'trusted chain' : 'not trusted'} (${r.validationError ?? 'no error'}) | **Chain depth:** ${r.chainDepth}`,
+        `**Protocol:** ${literalText(r.protocol ?? 'unknown')} | **Cipher:** ${literalText(r.cipher ?? 'unknown')}`,
+      );
+      lines.push(
+        `**Validation:** ${r.validationAuthorized ? 'trusted chain' : 'not trusted'} (${literalText(r.validationError ?? 'no error')}) | **Chain depth:** ${r.chainDepth}`,
       );
       const c = r.certificate;
       lines.push(
-        `**Identity:** ${r.identityAuthorized === null ? 'unknown' : r.identityAuthorized ? 'matches requested host' : 'does not match requested host'} (${r.identityError ?? 'no error'})`,
+        `**Identity:** ${r.identityAuthorized === null ? 'unknown' : r.identityAuthorized ? 'matches requested host' : 'does not match requested host'} (${literalText(r.identityError ?? 'no error')})`,
       );
-      lines.push(`**Subject:** ${c?.subjectCommonName ?? 'none presented'}`);
+      lines.push(`**Subject:** ${literalText(c?.subjectCommonName ?? 'none presented')}`);
       lines.push(
-        `**Issuer:** ${c?.issuerCommonName ?? 'unknown'} (${c?.issuerOrganization ?? 'no org'})`,
+        `**Issuer:** ${literalText(c?.issuerCommonName ?? 'unknown')} (${literalText(c?.issuerOrganization ?? 'no org')})`,
       );
       lines.push(
-        `**Valid:** ${c?.validFrom ?? 'unknown'} → ${c?.validTo ?? 'unknown'} (${c?.daysUntilExpiry ?? 'unknown'} days left)`,
+        `**Valid:** ${literalText(c?.validFrom ?? 'unknown')} → ${literalText(c?.validTo ?? 'unknown')} (${c?.daysUntilExpiry ?? 'unknown'} days left)`,
       );
-      lines.push(`**Serial:** ${c?.serialNumber ?? 'unknown'}`);
-      lines.push(`**SHA-256:** ${c?.fingerprintSha256 ?? 'unknown'}`);
-      lines.push(`**SANs:** ${c?.subjectAltNames.join(', ') || 'none'}`);
-      lines.push(`**EKU:** ${c?.extendedKeyUsages.join(', ') || 'none'}`);
-      lines.push(`**Findings:** ${r.findings.join(' ') || 'none'}`);
-      lines.push(`_Checked at ${r.checkedAt}_`);
+      lines.push(`**Serial:** ${literalText(c?.serialNumber ?? 'unknown')}`);
+      lines.push(`**SHA-256:** ${literalText(c?.fingerprintSha256 ?? 'unknown')}`);
+      lines.push(`**SANs:** ${c?.subjectAltNames.map(literalText).join(', ') || 'none'}`);
+      lines.push(`**EKU:** ${c?.extendedKeyUsages.map(literalText).join(', ') || 'none'}`);
+      lines.push(`**Findings:** ${r.findings.map(literalText).join(' ') || 'none'}`);
+      lines.push(`Checked at ${literalText(r.checkedAt)}`);
       lines.push('');
     }
     return [{ type: 'text', text: lines.join('\n') }];

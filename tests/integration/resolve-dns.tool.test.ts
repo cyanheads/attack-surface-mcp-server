@@ -119,12 +119,20 @@ describe('attacksurface_resolve_dns', () => {
     });
     expect(getEnrichment(ctx)).toEqual({});
     const blocks = resolveDnsTool.format?.(result);
-    if (blocks?.[0]?.type === 'text') {
-      expect(blocks[0].text).toContain('A:** 93.184.216.34');
-      expect(blocks[0].text).toContain('10 mail.example.com');
-      expect(blocks[0].text).toContain('ptr.example.com');
-      expect(blocks[0].text).toContain('8.8.8.8');
-    }
+    expect(blocks).toEqual([{ type: 'text', text: expect.any(String) }]);
+    expect(blocks?.[0]).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining('`A`: `93.184.216.34`'),
+    });
+    expect(blocks?.[0]).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining('`10 mail.example.com`'),
+    });
+    expect(blocks?.[0]).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining('`ptr.example.com`'),
+    });
+    expect(blocks?.[0]).toMatchObject({ type: 'text', text: expect.stringContaining('`8.8.8.8`') });
   });
 
   it('enforces host-count and record-type schema boundaries', () => {

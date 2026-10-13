@@ -101,7 +101,7 @@ describe('attacksurface_probe_http', () => {
       technologies: [{ name, category, evidence: `server: ${server}` }],
     });
     const text = JSON.stringify(result.content);
-    expect(text).toContain(`**${name}**  _(${category})_`);
+    expect(text).toContain(`\`${name}\`  _(${category})_`);
     expect(text).toContain(`server: ${server}`);
     expect(text).not.toContain('_(waf)_');
     expect(text).not.toContain('_(server)_');
@@ -223,7 +223,7 @@ describe('attacksurface_probe_http', () => {
       },
     });
     const text = JSON.stringify(result.content);
-    expect(text).toContain('Secure=false, HttpOnly=false, SameSite=None');
+    expect(text).toContain('Secure=false, HttpOnly=false, SameSite=`None`');
     expect(text).toContain('max-age=0');
     expect(text).toContain('No clickjacking');
     expect(text).toContain('SameSite=None without Secure');

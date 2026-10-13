@@ -10,6 +10,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig, parseResolverList } from '@/config/server-config.js';
 import { getDnsService } from '@/services/dns/dns-service.js';
 import { ALL_RECORD_TYPES, type DnsRecordType } from '@/services/dns/types.js';
+import { literalText } from '@/utils/literal-text.js';
 import { assertSafeResolverIp } from '@/utils/ssrf-guard.js';
 import { isValidHost, isValidRegistrationTarget } from '@/utils/validation.js';
 
@@ -182,35 +183,35 @@ export const resolveDnsTool = tool('attacksurface_resolve_dns', {
   format: (result) => {
     const lines: string[] = [];
     for (const r of result.results) {
-      lines.push(`## ${r.host}`);
+      lines.push(`## ${literalText(r.host)}`);
       lines.push(`**Resolved:** ${r.resolved ? 'yes' : 'no'}`);
-      if (r.hostError) lines.push(`**Error:** ${r.hostError}`);
+      if (r.hostError) lines.push(`**Error:** ${literalText(r.hostError)}`);
       const types = Object.keys(r.records) as DnsRecordType[];
       for (const t of types) {
-        lines.push(`**${t}:** ${(r.records[t] ?? []).join(', ')}`);
+        lines.push(`${literalText(t)}: ${(r.records[t] ?? []).map(literalText).join(', ')}`);
       }
       if (r.propagationMismatches.length > 0) {
         lines.push(`**Propagation mismatch on:** ${r.propagationMismatches.join(', ')}`);
       }
       for (const rr of r.resolverResults) {
         const rendered = Object.entries(rr.records)
-          .map(([t, vals]) => `${t}=[${vals.join(', ')}]`)
+          .map(([t, vals]) => `${literalText(t)}=[${vals.map(literalText).join(', ')}]`)
           .join(' ');
         lines.push(
-          `- _${rr.resolver}_ — ${rendered || 'no records'}, ${rr.latencyInMs}ms (error: ${rr.queryError ?? 'none'})`,
+          `- ${literalText(rr.resolver)} — ${rendered || 'no records'}, ${rr.latencyInMs}ms (error: ${literalText(rr.queryError ?? 'none')})`,
         );
       }
       if (r.reverse && r.reverse.length > 0) {
         lines.push('**Reverse DNS:**');
         for (const rev of r.reverse) {
           lines.push(
-            `- ${rev.ip} → ${rev.hostnames.length > 0 ? rev.hostnames.join(', ') : 'no PTR'}${rev.lookupError ? ` (error: ${rev.lookupError})` : ''}`,
+            `- ${literalText(rev.ip)} → ${rev.hostnames.length > 0 ? rev.hostnames.map(literalText).join(', ') : 'no PTR'}${rev.lookupError ? ` (error: ${literalText(rev.lookupError)})` : ''}`,
           );
         }
       }
       lines.push('');
     }
-    lines.push(`_Resolvers queried: ${result.resolversUsed.join(', ')}_`);
+    lines.push(`Resolvers queried: ${result.resolversUsed.map(literalText).join(', ')}`);
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });

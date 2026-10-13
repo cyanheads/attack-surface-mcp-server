@@ -25,9 +25,11 @@ export function isValidHost(value: string): boolean {
 /** True when the string is an IP, CIDR, or domain — the accepted shape for a registration target. */
 export function isValidRegistrationTarget(value: string): boolean {
   const v = value.trim();
-  const [addr, bits] = v.split('/');
+  if (v.includes('%')) return false;
+  const [addr, bits, extra] = v.split('/');
   if (bits !== undefined) {
-    const prefix = Number.parseInt(bits, 10);
+    if (extra !== undefined || !/^[0-9]+$/.test(bits)) return false;
+    const prefix = Number(bits);
     const ipKind = isIP(addr ?? '');
     if (ipKind === 4) return prefix >= 0 && prefix <= 32;
     if (ipKind === 6) return prefix >= 0 && prefix <= 128;

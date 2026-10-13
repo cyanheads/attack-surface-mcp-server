@@ -14,8 +14,10 @@ import * as net from 'node:net';
 const { isIP } = net;
 
 import type { Context } from '@cyanheads/mcp-ts-core';
+import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { ServerConfig } from '@/config/server-config.js';
 import { assertSafeUrl, resolveSafeHost } from '@/utils/ssrf-guard.js';
+import { normalizeAllocation } from './allocations.js';
 import type {
   DomainRegistration,
   IpRegistration,
@@ -165,8 +167,7 @@ export class RegistrationService {
     ctx: Context,
   ): Promise<RdapResponse> {
     const base = this.config.rdapBootstrapUrl.replace(/\/$/, '');
-    const path =
-      kind === 'ip' ? `ip/${encodeURIComponent(target)}` : `domain/${encodeURIComponent(target)}`;
+    const path = kind === 'ip' ? `ip/${target}` : `domain/${encodeURIComponent(target)}`;
     let url = `${base}/${path}`;
 
     for (let hop = 0; hop <= MAX_RDAP_REDIRECTS; hop++) {
@@ -212,21 +213,43 @@ export class RegistrationService {
 
   /**
    * WHOIS fallback over port 43. Queries IANA first to discover the authoritative WHOIS server,
-   * then queries it. Best-effort: a single referral hop, strict deadline. Returns the raw text.
+   * then queries it. Only the authoritative response may describe the target.
    */
   private async fetchWhois(target: string, ctx: Context): Promise<string> {
-    const ianaText = await this.whoisQuery(WHOIS_IANA, target, ctx);
-    const referMatch = /^(?:refer|whois):\s*(\S+)/im.exec(ianaText);
-    const referral = referMatch?.[1]?.trim();
-    if (referral && referral !== WHOIS_IANA) {
-      try {
-        const authoritative = await this.whoisQuery(referral, target, ctx);
-        if (authoritative.trim().length > 0) return authoritative;
-      } catch {
-        // Fall through to the IANA response.
+    let authoritative: string;
+    try {
+      const ianaText = await this.whoisQuery(WHOIS_IANA, target, ctx);
+      const referral = /^(?:refer|whois):[ \t]*(\S+)/im.exec(ianaText)?.[1];
+      if (!referral || referral.toLowerCase() === WHOIS_IANA) {
+        throw new Error('IANA did not supply an authoritative WHOIS referral.');
       }
+      authoritative = await this.whoisQuery(referral, target, ctx);
+      if (!authoritative.trim()) throw new Error('Authoritative WHOIS returned an empty response.');
+    } catch (cause) {
+      ctx.signal?.throwIfAborted();
+      throw serviceUnavailable(
+        `WHOIS lookup unavailable: ${cause instanceof Error ? cause.message : String(cause)}`,
+        { reason: 'source_unavailable' },
+        { cause },
+      );
     }
-    return ianaText;
+    if (
+      /^[ \t]*(?:%[ \t]*)?(?:no match(?:\s|$)|not found\b|no entries found\b|no data found\b|no object found\b|no such domain\b)/im.test(
+        authoritative,
+      )
+    ) {
+      throw notFound(`No registration found for ${target}.`, { reason: 'no_match' });
+    }
+    const fields =
+      classifyTarget(target) === 'ip'
+        ? /^[ \t]*(?:NetName|netname|network:Network-Name|CIDR|inetnum|inet6num|route|route6|OriginAS|origin|Country|country|NetRange|netblock|network:IP-Network|network:ID|handle):[ \t]*\S/im
+        : /^[ \t]*(?:Domain Name|domain|Registrar|registrar|Domain Status|status|Creation Date|created|Registered on|Registry Expiry Date|Expiry date|paid-till|Expiration Date|Updated Date|last-update|changed|Name Server|nserver|nameserver|DNSSEC|Registry Domain ID):[ \t]*\S/im;
+    if (!fields.test(authoritative)) {
+      throw serviceUnavailable('Authoritative WHOIS returned unrecognized registration text.', {
+        reason: 'source_unavailable',
+      });
+    }
+    return authoritative;
   }
 
   /**
@@ -248,6 +271,7 @@ export class RegistrationService {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        ctx.signal?.removeEventListener('abort', onAbort);
         socket.destroy();
         if (err) reject(err);
         else resolve(data);
@@ -318,9 +342,9 @@ export class RegistrationService {
     const networkName = /^[ \t]*(?:NetName|netname|network:Network-Name):[ \t]*(\S[^\r\n]*)$/im
       .exec(text)?.[1]
       ?.trim();
-    const cidrMatches = [...text.matchAll(/^[ \t]*(?:CIDR|inetnum|route):[ \t]*(\S[^\r\n]*)$/gim)]
-      .map((m) => (m[1] ?? '').trim())
-      .filter(Boolean);
+    const cidrMatches = [
+      ...text.matchAll(/^[ \t]*(?:CIDR|inetnum|inet6num|route|route6):[ \t]*(\S[^\r\n]*)$/gim),
+    ].flatMap((m) => normalizeAllocation((m[1] ?? '').trim()));
     const asnMatches = [...text.matchAll(/^[ \t]*(?:OriginAS|origin):[ \t]*AS?(\d+)/gim)]
       .map((m) => Number.parseInt(m[1] ?? '', 10))
       .filter((n) => Number.isFinite(n));

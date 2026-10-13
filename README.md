@@ -97,8 +97,9 @@ All resource data is also reachable via tools — tool-only clients lose nothing
 
 ### `attacksurface_lookup_registration` <sub>tool</sub>
 
-- Accepts a domain, IP, or CIDR; `type` (`auto` / `domain` / `ip`) controls interpretation. Uses RDAP first, then WHOIS port 43 when needed.
+- Accepts a domain, unscoped IP, or CIDR with one decimal integer prefix (IPv4 0–32, IPv6 0–128); `type` (`auto` / `domain` / `ip`) controls interpretation. Uses RDAP first, then authoritative WHOIS port 43 when needed.
 - Domain results include registrar, EPP statuses, lifecycle events, nameservers, and DNSSEC; IP/CIDR results include netblock, allocation CIDRs, ASN, and country. Sparse or redacted fields stay unknown.
+- WHOIS explicit no-match returns `no_match`; missing or failed referrals and empty/unrecognized authoritative responses return `source_unavailable`. Allocation ranges become exact CIDR coverage; invalid allocation text remains in `rawWhois`. The complete raw response is rendered as literal text, as are upstream strings in registration, HTTP, TLS, DNS, and Shodan output.
 
 ---
 

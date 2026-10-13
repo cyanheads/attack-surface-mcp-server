@@ -9,10 +9,12 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { markdown } from '@cyanheads/mcp-ts-core/utils';
 import {
   classifyTarget,
   getRegistrationService,
 } from '@/services/registration/registration-service.js';
+import { literalText } from '@/utils/literal-text.js';
 import { isValidRegistrationTarget, normalizeDomain } from '@/utils/validation.js';
 
 const EventSchema = z
@@ -61,7 +63,7 @@ export const lookupRegistrationTool = tool('attacksurface_lookup_registration', 
     target: z
       .string()
       .describe(
-        'A domain (e.g. "example.com"), an IP (e.g. "8.8.8.8"), or a CIDR (e.g. "8.8.8.0/24").',
+        'A domain (e.g. "example.com"), an unscoped IP (e.g. "8.8.8.8"), or a CIDR with one slash and a decimal integer prefix (IPv4 0–32, IPv6 0–128; e.g. "8.8.8.0/24").',
       ),
     type: z
       .enum(['auto', 'domain', 'ip'])
@@ -80,6 +82,20 @@ export const lookupRegistrationTool = tool('attacksurface_lookup_registration', 
     notes: z.array(z.string()).describe('Notes such as RDAP-timeout-then-WHOIS-fallback.'),
   }),
   errors: [
+    {
+      reason: 'no_match',
+      code: JsonRpcErrorCode.NotFound,
+      thrownBy: 'service',
+      when: 'Authoritative WHOIS explicitly reports no registration match.',
+      recovery: 'Check the target spelling or query another registered domain or allocation.',
+    },
+    {
+      reason: 'source_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      thrownBy: 'service',
+      when: 'RDAP failed and authoritative WHOIS is unavailable or unrecognized.',
+      recovery: 'Retry the lookup later or consult the authoritative registry directly.',
+    },
     {
       reason: 'invalid_target',
       code: JsonRpcErrorCode.ValidationError,
@@ -107,44 +123,43 @@ export const lookupRegistrationTool = tool('attacksurface_lookup_registration', 
   format: (result) => {
     const lines: string[] = [];
     const r = result.registration;
-    lines.push(`## Registration: ${r.target} (${r.kind})`);
+    lines.push(`## Registration: ${literalText(r.target)} (${r.kind})`);
     lines.push(`**Source:** ${result.source}`);
 
     if (r.kind === 'domain') {
-      lines.push(`**Registrar:** ${r.registrar ?? 'unknown'}`);
+      lines.push(`**Registrar:** ${literalText(r.registrar ?? 'unknown')}`);
       lines.push(
         `**DNSSEC:** ${r.dnssecSigned === undefined ? 'unknown' : r.dnssecSigned ? 'signed' : 'unsigned'}`,
       );
-      if (r.statuses.length > 0) lines.push(`**Status:** ${r.statuses.join(', ')}`);
+      if (r.statuses.length > 0)
+        lines.push(`**Status:** ${r.statuses.map(literalText).join(', ')}`);
       if (r.events.length > 0) {
         lines.push('**Events:**');
-        for (const e of r.events) lines.push(`- ${e.action}: ${e.date}`);
+        for (const e of r.events) lines.push(`- ${literalText(e.action)}: ${literalText(e.date)}`);
       }
-      if (r.nameservers.length > 0) lines.push(`**Nameservers:** ${r.nameservers.join(', ')}`);
+      if (r.nameservers.length > 0)
+        lines.push(`**Nameservers:** ${r.nameservers.map(literalText).join(', ')}`);
     } else {
-      lines.push(`**Network:** ${r.networkName ?? 'unknown'}`);
-      lines.push(`**Country:** ${r.country ?? 'unknown'}`);
-      if (r.cidrs.length > 0) lines.push(`**CIDRs:** ${r.cidrs.join(', ')}`);
+      lines.push(`**Network:** ${literalText(r.networkName ?? 'unknown')}`);
+      lines.push(`**Country:** ${literalText(r.country ?? 'unknown')}`);
+      if (r.cidrs.length > 0) lines.push(`**CIDRs:** ${r.cidrs.map(literalText).join(', ')}`);
       if (r.originAsns.length > 0)
         lines.push(`**Origin ASN:** ${r.originAsns.map((a) => `AS${a}`).join(', ')}`);
-      if (r.statuses.length > 0) lines.push(`**Status:** ${r.statuses.join(', ')}`);
+      if (r.statuses.length > 0)
+        lines.push(`**Status:** ${r.statuses.map(literalText).join(', ')}`);
       if (r.events.length > 0) {
         lines.push('**Events:**');
-        for (const e of r.events) lines.push(`- ${e.action}: ${e.date}`);
+        for (const e of r.events) lines.push(`- ${literalText(e.action)}: ${literalText(e.date)}`);
       }
     }
 
     if (result.notes.length > 0) {
       lines.push('**Notes:**');
-      for (const n of result.notes) lines.push(`- ${n}`);
+      for (const n of result.notes) lines.push(`- ${literalText(n)}`);
     }
     if (result.rawWhois) {
-      const excerpt = result.rawWhois.split('\n').slice(0, 40).join('\n');
-      lines.push('<details><summary>Raw WHOIS</summary>\n');
-      lines.push('```');
-      lines.push(excerpt);
-      lines.push('```');
-      lines.push('</details>');
+      lines.push('### Raw WHOIS\n');
+      lines.push(markdown().codeBlock(result.rawWhois).build());
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

@@ -53,7 +53,22 @@ describe('RegistrationService fuzz', () => {
     vi.stubGlobal('fetch', fetchMock);
     vi.stubEnv('ATTACKSURFACE_ALLOW_PRIVATE_TARGETS', 'true');
     netBoundary.createConnection.mockReset();
-    netBoundary.createConnection.mockImplementation(() => new FakeWhoisSocket());
+    netBoundary.createConnection.mockImplementation((_port, host) => {
+      if (host === 'whois.iana.org') {
+        const socket = new EventEmitter();
+        Object.assign(socket, {
+          destroy() {},
+          setEncoding() {},
+          write() {
+            socket.emit('data', 'refer: whois.registry.test\n');
+            socket.emit('end');
+          },
+        });
+        queueMicrotask(() => socket.emit('connect'));
+        return socket;
+      }
+      return new FakeWhoisSocket();
+    });
   });
 
   afterEach(() => {
@@ -110,7 +125,9 @@ describe('RegistrationService fuzz', () => {
       fc.asyncProperty(
         fc.record({
           netName: lineValue,
-          cidr: lineValue,
+          cidr: fc
+            .tuple(fc.integer({ min: 0, max: 255 }), fc.integer({ min: 0, max: 255 }))
+            .map(([a, b]) => `${a}.${b}.0.0/16`),
           asn: fc.integer({ min: 1, max: 4_294_967_295 }),
           country: fc
             .tuple(

@@ -5,7 +5,7 @@
 
 import { EventEmitter } from 'node:events';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
 
@@ -78,6 +78,105 @@ describe('attacksurface_lookup_registration', () => {
     vi.unstubAllEnvs();
   });
 
+  it('retains a completely sparse successful RDAP record', async () => {
+    fetchMock.mockResolvedValue(Response.json({}));
+    const result = await lookupRegistrationTool.handler(
+      lookupRegistrationTool.input.parse({ target: 'example.com' }),
+      context(),
+    );
+    expect(result).toEqual({
+      source: 'rdap',
+      registration: {
+        kind: 'domain',
+        target: 'example.com',
+        statuses: [],
+        events: [],
+        nameservers: [],
+      },
+      rawWhois: null,
+      notes: [],
+    });
+    expect(lookupRegistrationTool.format?.(result)?.[0]).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining('unknown'),
+    });
+  });
+
+  it.each([
+    '8.8.8.8/24oops',
+    '8.8.8.8/24/garbage',
+    '8.8.8.8/2.5',
+    '8.8.8.8/0x10',
+    '8.8.8.8/',
+    '8.8.8.8/+24',
+    '8.8.8.8/-1',
+    '8.8.8.8/33',
+    '2001:db8::/129',
+    'fe80::1%en0',
+    'fe80::1%en0/64',
+  ])('rejects malformed target %s before I/O', async (target) => {
+    fetchMock.mockResolvedValue(Response.json({}));
+    await expect(
+      lookupRegistrationTool.handler(lookupRegistrationTool.input.parse({ target }), context()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_target' },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(netBoundary.createConnection).not.toHaveBeenCalled();
+  });
+
+  it.each(['auto', 'ip'] as const)('uses literal IP/CIDR RDAP syntax in %s mode', async (type) => {
+    for (const target of [
+      '8.8.8.8',
+      '8.8.8.0/24',
+      '2001:4860::',
+      '2001:4860::/32',
+      '0.0.0.0/0',
+      '255.255.255.255/32',
+      '::/0',
+      '::1/128',
+    ]) {
+      fetchMock.mockResolvedValue(Response.json({}));
+      const result = await lookupRegistrationTool.handler(
+        lookupRegistrationTool.input.parse({ target, type }),
+        context(),
+      );
+      expect(result.registration.target).toBe(target);
+      expect(fetchMock).toHaveBeenLastCalledWith(
+        `https://rdap.example.test/ip/${target}`,
+        expect.objectContaining({ redirect: 'manual' }),
+      );
+    }
+  });
+
+  it('renders the complete WHOIS tail with collision-safe plain fencing', () => {
+    const rawWhois = `${Array.from({ length: 45 }, (_, n) => `line ${n}`).join('\n')}\n\`\`\`\`\`\n</details><section>*audit*</section>\nTAIL`;
+    const result = {
+      source: 'whois' as const,
+      registration: {
+        kind: 'domain' as const,
+        target: 'example.com',
+        statuses: [],
+        events: [],
+        nameservers: [],
+        registrar: '<section>*audit*</section>',
+      },
+      rawWhois,
+      notes: [],
+    };
+    const blocks = lookupRegistrationTool.format?.(result);
+    expect(blocks).toEqual([{ type: 'text', text: expect.any(String) }]);
+    expect(blocks?.[0]).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining(`### Raw WHOIS\n\n\`\`\`\`\`\`\n${rawWhois}\n\`\`\`\`\`\``),
+    });
+    expect(blocks?.[0]).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining('**Registrar:** `<section>*audit*</section>`'),
+    });
+  });
+
   it('normalizes a domain and returns schema-valid sparse RDAP output', async () => {
     fetchMock.mockResolvedValue(
       Response.json({
@@ -142,13 +241,13 @@ describe('attacksurface_lookup_registration', () => {
       events: [],
     });
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://rdap.example.test/ip/8.8.8.0%2F24',
+      'https://rdap.example.test/ip/8.8.8.0/24',
       expect.objectContaining({ redirect: 'manual' }),
     );
     const blocks = lookupRegistrationTool.format?.(result);
     expect(blocks?.[0]).toMatchObject({
       type: 'text',
-      text: expect.stringContaining('Registration: 8.8.8.0/24 (ip)'),
+      text: expect.stringContaining('Registration: `8.8.8.0/24` (ip)'),
     });
   });
 
@@ -172,13 +271,13 @@ describe('attacksurface_lookup_registration', () => {
       cidrs: ['2001:db8::/32'],
     });
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://rdap.example.test/ip/2001%3Adb8%3A%3A%2F32',
+      'https://rdap.example.test/ip/2001:db8::/32',
       expect.objectContaining({ redirect: 'manual' }),
     );
     const blocks = lookupRegistrationTool.format?.(result);
     expect(blocks?.[0]).toMatchObject({
       type: 'text',
-      text: expect.stringContaining('Registration: 2001:db8::/32 (ip)'),
+      text: expect.stringContaining('Registration: `2001:db8::/32` (ip)'),
     });
   });
 
@@ -254,4 +353,21 @@ describe('attacksurface_lookup_registration', () => {
       ),
     ).rejects.toThrow('WHOIS refused');
   });
+
+  it.each([
+    ['No match for "EXAMPLE.COM".', 'no_match', JsonRpcErrorCode.NotFound],
+    ['unrecognized upstream response', 'source_unavailable', JsonRpcErrorCode.ServiceUnavailable],
+  ])(
+    'returns %s as a typed error with recovery on both wire surfaces',
+    async (response, reason, code) => {
+      fetchMock.mockRejectedValue(new Error('RDAP offline'));
+      netBoundary.responses.push('refer: whois.registry.test\n', response);
+      const result = await runToolContract(lookupRegistrationTool, { target: 'example.com' });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code, data: { reason, recovery: { hint: expect.any(String) } } },
+      });
+      expect(JSON.stringify(result.content)).toContain(reason);
+    },
+  );
 });

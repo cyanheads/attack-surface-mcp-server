@@ -18,6 +18,7 @@ This is a defensive external-attack-surface-mapping (EASM) server. It is **passi
 - **Keep the framing in the surface.** The server `instructions`, the `attacksurface_map_domain` description, and `attacksurface_recon_guidance` all state the target must be owned or authorized for assessment. Preserve that when editing any of them. Don't add active/intrusive capability or a `mode: active` toggle — excluding it structurally is the safety property.
 - **The SSRF guard is the security spine.** Every outbound connection to a user-supplied target (DNS, TLS, HTTP) must pass `assertSafeDomain` / `assertSafeUrl` / `assertSafeResolverIp` (`src/utils/ssrf-guard.ts`) before connecting. It rejects private, loopback, link-local, cloud-metadata, and reserved ranges. Never route a new outbound path around it.
 - **No fabricated signal.** Report detections with their triggering evidence; report absent CT/DNS/RDAP fields as unknown. No invented confidence composites.
+- **Registration authority and literal evidence.** CIDRs require one decimal prefix in the family range; zone identifiers are rejected. RDAP IP paths preserve literal delimiters. WHOIS parses only recognizable authoritative referral responses, with typed `no_match` for explicit negatives and `source_unavailable` for unavailable/unsupported responses. Normalize allocation ranges to exact CIDRs while retaining invalid text in `rawWhois`. Registration/HTTP/TLS/DNS/Shodan formatters render upstream values through `literalText`; raw WHOIS uses a complete collision-safe fenced block.
 
 ---
 

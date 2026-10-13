@@ -10,6 +10,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getHttpService } from '@/services/http/http-service.js';
+import { literalText } from '@/utils/literal-text.js';
 
 const RedirectHopSchema = z
   .object({
@@ -149,51 +150,58 @@ export const probeHttpTool = tool('attacksurface_probe_http', {
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(`## ${result.url}`);
-    lines.push(`**Error:** ${result.transportError ?? 'none'}`);
-    lines.push(`**Final status:** ${result.finalStatus} | **Final URL:** ${result.finalUrl}`);
+    lines.push(`## ${literalText(result.url)}`);
+    lines.push(`**Error:** ${literalText(result.transportError ?? 'none')}`);
     lines.push(
-      `**Body inspection:** ${result.bodyInspection.status} (${result.bodyInspection.error ?? 'no error'})`,
+      `**Final status:** ${result.finalStatus} | **Final URL:** ${literalText(result.finalUrl)}`,
+    );
+    lines.push(
+      `**Body inspection:** ${result.bodyInspection.status} (${literalText(result.bodyInspection.error ?? 'no error')})`,
     );
     lines.push('**Redirect chain:**');
     if (result.redirectChain.length === 0) lines.push('- (none)');
     for (const hop of result.redirectChain) {
-      lines.push(`- ${hop.status} ${hop.url} → ${hop.location ?? '(no location)'}`);
+      lines.push(
+        `- ${hop.status} ${literalText(hop.url)} → ${literalText(hop.location ?? '(no location)')}`,
+      );
     }
 
     const a = result.securityAudit;
     lines.push('### Security headers');
-    lines.push(`- **HSTS:** ${a.hsts ?? 'absent'}`);
-    lines.push(`- **CSP:** ${a.csp ?? 'absent'}`);
-    lines.push(`- **X-Frame-Options:** ${a.xFrameOptions ?? 'absent'}`);
-    lines.push(`- **X-Content-Type-Options:** ${a.xContentTypeOptions ?? 'absent'}`);
-    lines.push(`- **Referrer-Policy:** ${a.referrerPolicy ?? 'absent'}`);
-    lines.push(`- **Permissions-Policy:** ${a.permissionsPolicy ?? 'absent'}`);
+    lines.push(`- **HSTS:** ${literalText(a.hsts ?? 'absent')}`);
+    lines.push(`- **CSP:** ${literalText(a.csp ?? 'absent')}`);
+    lines.push(`- **X-Frame-Options:** ${literalText(a.xFrameOptions ?? 'absent')}`);
+    lines.push(`- **X-Content-Type-Options:** ${literalText(a.xContentTypeOptions ?? 'absent')}`);
+    lines.push(`- **Referrer-Policy:** ${literalText(a.referrerPolicy ?? 'absent')}`);
+    lines.push(`- **Permissions-Policy:** ${literalText(a.permissionsPolicy ?? 'absent')}`);
     lines.push(
-      `- **CORS Allow-Origin:** ${a.corsAllowOrigin ?? 'absent'} (reflects arbitrary origin: ${a.corsReflectsOrigin})`,
+      `- **CORS Allow-Origin:** ${literalText(a.corsAllowOrigin ?? 'absent')} (reflects arbitrary origin: ${a.corsReflectsOrigin})`,
     );
     lines.push('- **Cookies:**');
     if (a.cookies.length === 0) lines.push('  - (none)');
     for (const c of a.cookies) {
       lines.push(
-        `  - ${c.name}: Secure=${c.secure}, HttpOnly=${c.httpOnly}, SameSite=${c.sameSite ?? 'none'}`,
+        `  - ${literalText(c.name)}: Secure=${c.secure}, HttpOnly=${c.httpOnly}, SameSite=${literalText(c.sameSite ?? 'none')}`,
       );
     }
     lines.push('**Findings:**');
     if (a.findings.length === 0) lines.push('- (none)');
-    for (const f of a.findings) lines.push(`- ${f}`);
+    for (const f of a.findings) lines.push(`- ${literalText(f)}`);
 
     lines.push('### Technology fingerprint');
     if (result.technologies.length === 0) lines.push('- (none detected)');
     for (const t of result.technologies) {
-      lines.push(`- **${t.name}** ${t.version ?? ''} _(${t.category})_ — ${t.evidence}`);
+      lines.push(
+        `- ${literalText(t.name)} ${t.version === undefined ? '' : literalText(t.version)} _(${t.category})_ — ${literalText(t.evidence)}`,
+      );
     }
 
-    const headerKeys = Object.keys(result.headers);
-    lines.push(`### Response headers (${headerKeys.length})`);
-    for (const k of headerKeys) lines.push(`- ${k}: ${result.headers[k]}`);
+    const headers = Object.entries(result.headers);
+    lines.push(`### Response headers (${headers.length})`);
+    for (const [name, value] of headers)
+      lines.push(`- ${literalText(name)}: ${literalText(value)}`);
 
-    lines.push(`_Checked at ${result.checkedAt}_`);
+    lines.push(`Checked at ${literalText(result.checkedAt)}`);
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
