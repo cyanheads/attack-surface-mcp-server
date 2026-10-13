@@ -12,21 +12,18 @@
  *                                       the http/https scheme. Re-call on every redirect hop.
  *  - `assertSafeResolverIp(ip)` — resolver IP validation (direct IP, no DNS lookup)
  *
- * **DNS-rebinding (TOCTOU) note.** An assert-then-connect-by-name pattern re-resolves the hostname
- * at connect time, so a hostile authoritative DNS can answer "public" to the guard and "private" to
- * the connect. Socket-based callers (TLS handshake, WHOIS port-43) defeat this by dialing the
- * validated IP from `resolveSafeHost` while still presenting the original hostname for SNI / vhost
- * routing. The HTTP probe uses the platform `fetch`, which has no portable IP-pinning hook across
- * stdio/HTTP/Worker runtimes; it re-checks via `assertSafeUrl` on every hop, leaving a narrow
- * rebinding residual. Acceptable for a passive recon tool whose worst case is one bounded GET to an
- * internal address with no credentials attached and the response surfaced as posture data.
+ * Socket-based callers (TLS handshake, WHOIS port-43) dial the validated IP from `resolveSafeHost`
+ * while preserving the requested hostname for TLS identity and SNI. HTTP uses platform `fetch`,
+ * whose portable API cannot pin DNS across supported runtimes. Each redirect target is rechecked,
+ * but HTTP DNS validation and connection resolution remain separate operations.
  *
- * Opt-out: set `ATTACKSURFACE_ALLOW_PRIVATE_TARGETS=true` to disable all checks, for local/trusted
- * deployments where assessing internal-network assets is the intended use case.
+ * Opt-out: `ATTACKSURFACE_ALLOW_PRIVATE_TARGETS=true` permits non-public target ranges for trusted
+ * internal-network assessment. URL parsing and http/https scheme checks remain enforced.
  * @module utils/ssrf-guard
  */
 
 import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
 
 /** CIDR blocks that are non-routable or typically internal. */
 const PRIVATE_RANGES: Array<{ base: bigint; mask: bigint; label: string }> = (() => {
@@ -59,21 +56,47 @@ const PRIVATE_RANGES: Array<{ base: bigint; mask: bigint; label: string }> = (()
   ];
 })();
 
-/**
- * IPv6 prefixes that are non-public. Matched against the first hextet group so a public address
- * is not rejected for merely sharing leading hex characters (e.g. `fe00::` link-local vs a public
- * `fec0:`-led address — both start with `fe`, only the former is reserved). Each entry is the set
- * of leading hextet values that classify as the labeled range.
- */
-const PRIVATE_IPV6_GROUP_PREFIXES: Array<{ test: (firstGroup: string) => boolean; label: string }> =
+/** Parse a validated IPv6 literal into its 128-bit value, independent of spelling. */
+function ipv6Value(ip: string): bigint {
+  let normalized = ip;
+  const lastColon = ip.lastIndexOf(':');
+  const tail = ip.slice(lastColon + 1);
+  if (tail.includes('.')) {
+    const v4 = tail.split('.').reduce((value, octet) => (value << 8n) | BigInt(octet), 0n);
+    normalized = `${ip.slice(0, lastColon + 1)}${(v4 >> 16n).toString(16)}:${(v4 & 0xffffn).toString(16)}`;
+  }
+  const [left = '', right] = normalized.split('::');
+  const leading = left ? left.split(':') : [];
+  const trailing = right ? right.split(':') : [];
+  const groups =
+    right === undefined
+      ? leading
+      : [...leading, ...Array<string>(8 - leading.length - trailing.length).fill('0'), ...trailing];
+  return groups.reduce((value, group) => (value << 16n) | BigInt(`0x${group}`), 0n);
+}
+
+/** Non-public IPv6 CIDRs, compared numerically (IANA special-purpose registry and RFC 3879). */
+const PRIVATE_IPV6_RANGES = (
   [
-    // Unique local fc00::/7 — first hextet fc00–fdff.
-    { test: (g) => /^f[cd]/.test(g), label: 'unique local (RFC 4193)' },
-    // Link-local fe80::/10 — first hextet fe80–febf.
-    { test: (g) => /^fe[89ab]/.test(g), label: 'link-local' },
-    // Multicast ff00::/8 — first hextet ff00–ffff.
-    { test: (g) => /^ff/.test(g), label: 'multicast' },
-  ];
+    ['::', 128, 'unspecified'],
+    ['::1', 128, 'loopback'],
+    ['100::', 64, 'discard-only'],
+    ['100:0:0:1::', 64, 'dummy IPv6 prefix'],
+    ['64:ff9b:1::', 48, 'local IPv4-IPv6 translation'],
+    ['2001:2::', 48, 'benchmarking'],
+    ['2001:db8::', 32, 'documentation'],
+    ['3fff::', 20, 'documentation'],
+    ['5f00::', 16, 'segment routing SIDs'],
+    ['fc00::', 7, 'unique local (RFC 4193)'],
+    ['fe80::', 10, 'link-local'],
+    ['fec0::', 10, 'deprecated site-local (RFC 3879)'],
+    ['ff00::', 8, 'multicast'],
+  ] as const
+).map(([base, bits, label]) => ({
+  base: ipv6Value(base),
+  shift: BigInt(128 - bits),
+  label,
+}));
 
 /** Returns the range label if the IPv4 address string falls in a private/reserved range, else null. */
 function isPrivateIPv4(ip: string): string | null {
@@ -87,42 +110,21 @@ function isPrivateIPv4(ip: string): string | null {
   return null;
 }
 
-/** Hex hextet pair (e.g. "7f00", "0001") → dotted IPv4 ("127.0.0.1"). */
-function hextetsToDottedV4(hi: string, lo: string): string {
-  const h = parseInt(hi, 16);
-  const l = parseInt(lo, 16);
-  return `${(h >> 8) & 0xff}.${h & 0xff}.${(l >> 8) & 0xff}.${l & 0xff}`;
-}
-
 /** Returns the range label if the IPv6 address string falls in a private/reserved range, else null. */
 function isPrivateIPv6(ip: string): string | null {
   const normalized = ip.toLowerCase().replace(/^\[/, '').replace(/\]$/, '').replace(/%.*$/, '');
-
-  // Loopback and unspecified — exact only (avoid rejecting public addresses ending in these).
-  if (normalized === '::1') return 'loopback';
-  if (normalized === '::') return 'unspecified';
-
-  // IPv4-mapped/embedded with a trailing dotted v4 quad (::ffff:10.0.0.1, ::ffff:0:10.0.0.1,
-  // 64:ff9b::10.0.0.1). Defer the embedded address to the v4 classifier so private v4 space
-  // tunneled through v6 notation is still blocked.
-  const dottedTail = /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(normalized);
-  if (dottedTail?.[1]) {
-    const label = isPrivateIPv4(dottedTail[1]);
+  if (isIP(normalized) !== 6) return null;
+  const value = ipv6Value(normalized);
+  for (const { base, shift, label } of PRIVATE_IPV6_RANGES) {
+    if (value >> shift === base >> shift) return label;
+  }
+  // Only standardized IPv4 embedding layouts receive an IPv4 classification.
+  const prefix = value >> 32n;
+  if (prefix === 0xffffn || prefix === 0xffff0000n || prefix === ipv6Value('64:ff9b::') >> 32n) {
+    const v4 = value & 0xffff_ffffn;
+    const dotted = [24n, 16n, 8n, 0n].map((shift) => String((v4 >> shift) & 255n)).join('.');
+    const label = isPrivateIPv4(dotted);
     if (label) return `IPv4-embedded ${label}`;
-  }
-
-  // IPv4-mapped in pure-hex form (::ffff:7f00:1 == 127.0.0.1). Reconstruct the embedded v4 and
-  // classify it — this is the form that bypassed the old dotted-only check.
-  const hexMapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(normalized);
-  if (hexMapped?.[1] && hexMapped[2]) {
-    const label = isPrivateIPv4(hextetsToDottedV4(hexMapped[1], hexMapped[2]));
-    if (label) return `IPv4-mapped ${label}`;
-  }
-
-  // Range classification on the first hextet group.
-  const firstGroup = normalized.startsWith('::') ? '0' : (normalized.split(':')[0] ?? '');
-  for (const { test, label } of PRIVATE_IPV6_GROUP_PREFIXES) {
-    if (test(firstGroup)) return label;
   }
   return null;
 }
@@ -204,7 +206,7 @@ function privateTargetsAllowed(): boolean {
  * Assert that a raw URL is safe to fetch. Enforces http/https scheme and rejects hostnames that
  * resolve to a non-public address. Throws with an `SSRF_BLOCKED` prefix on rejection and accepts an
  * optional signal so callers can include DNS validation in their request budget.
- * No-ops when `ATTACKSURFACE_ALLOW_PRIVATE_TARGETS=true`.
+ * The private-target opt-out skips only target-range checks; URL and scheme checks always apply.
  */
 export async function assertSafeUrl(rawUrl: string, signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();

@@ -26,6 +26,7 @@ describe('attacksurface_probe_http', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
   });
@@ -151,5 +152,80 @@ describe('attacksurface_probe_http', () => {
       'Exceeded 10 redirects without a final response.',
     );
     expect(JSON.stringify(result.content)).toContain('Could not complete the probe');
+  });
+
+  it.each(['complete', 'limited', 'failed'])(
+    'exposes %s body inspection on both surfaces',
+    async (status) => {
+      const body =
+        status === 'failed'
+          ? new ReadableStream({
+              start(controller) {
+                controller.error(new Error('body interrupted'));
+              },
+            })
+          : 'x'.repeat(status === 'limited' ? 64_000 : 0);
+      fetchMock.mockResolvedValue(new Response(body, { headers: { server: 'Caddy' } }));
+      const result = await runToolContract(probeHttpTool, { url: 'https://example.com' });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        finalStatus: 200,
+        transportError: null,
+        bodyInspection: { status, error: status === 'failed' ? 'body interrupted' : null },
+        technologies: [{ name: 'Caddy' }],
+      });
+      expect(JSON.stringify(result.content)).toContain(`Body inspection:** ${status}`);
+      if (status === 'failed') expect(JSON.stringify(result.content)).toContain('body interrupted');
+    },
+  );
+
+  it('propagates caller cancellation during body inspection through both error surfaces', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValue(new Response(new ReadableStream()));
+    const controller = new AbortController();
+    const pending = runToolContract(
+      probeHttpTool,
+      { url: 'https://example.com' },
+      { context: { signal: controller.signal } },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    const result = await pending;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.RequestCancelled },
+    });
+    expect(JSON.stringify(result.content)).toMatch(/cancel|abort/i);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('reports ineffective security values with retained evidence on both surfaces', async () => {
+    const headers = {
+      'x-frame-options': 'invalid',
+      'x-content-type-options': 'invalid',
+      'strict-transport-security': 'max-age=0',
+      'content-security-policy': "default-src 'self'; report-uri /frame-ancestors",
+      'set-cookie': 'session=x; Securely; HttpOnlyish; SameSite=None',
+    };
+    fetchMock.mockResolvedValue(new Response('', { headers }));
+    const result = await runToolContract(probeHttpTool, { url: 'https://example.com' });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      headers,
+      securityAudit: {
+        cookies: [{ secure: false, httpOnly: false, sameSite: 'None' }],
+        findings: expect.arrayContaining([
+          expect.stringContaining('HSTS does not contain'),
+          expect.stringContaining('No clickjacking'),
+          expect.stringContaining('nosniff'),
+          expect.stringContaining('SameSite=None without Secure'),
+        ]),
+      },
+    });
+    const text = JSON.stringify(result.content);
+    expect(text).toContain('Secure=false, HttpOnly=false, SameSite=None');
+    expect(text).toContain('max-age=0');
+    expect(text).toContain('No clickjacking');
+    expect(text).toContain('SameSite=None without Secure');
   });
 });

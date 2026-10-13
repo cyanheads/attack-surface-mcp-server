@@ -71,11 +71,48 @@ describe('assertSafeResolverIp', () => {
     }
   });
 
+  it('classifies equivalent IPv6 forms consistently at every guard entry point', async () => {
+    for (const ip of [
+      '0:0:0:0:0:0:0:1',
+      '0000:0000:0000:0000:0000:0000:0000:0001',
+      '0:0:0:0:0:FFFF:7f00:1',
+      '0:0:0:0:0:ffff:127.0.0.1',
+      '64:ff9b::7f00:1',
+      '::ffff:0:7f00:1',
+      '2001:db8::1',
+      '3fff::1',
+      'fec0::1',
+    ]) {
+      expect(() => assertSafeResolverIp(ip), ip).toThrow(/SSRF_BLOCKED/);
+      await expect(assertSafeDomain(ip), ip).rejects.toThrow(/SSRF_BLOCKED/);
+      await expect(resolveSafeHost(ip), ip).rejects.toThrow(/SSRF_BLOCKED/);
+      await expect(assertSafeUrl(`https://[${ip}]/`), ip).rejects.toThrow(/SSRF_BLOCKED/);
+    }
+  });
+
+  it('does not treat native IPv6 low bits as an embedded private IPv4 address', async () => {
+    for (const ip of ['2606:4700::127.0.0.1', '2606:4700::7f00:1', '64:ff9b::808:808']) {
+      expect(() => assertSafeResolverIp(ip)).not.toThrow();
+      await expect(resolveSafeHost(ip)).resolves.toBeNull();
+      await expect(assertSafeUrl(`https://[${ip}]/`)).resolves.toBeUndefined();
+    }
+  });
+
+  it.each(['64:ff9b:1::1', '100:0:0:1::1', '5f00::1'])(
+    'rejects non-global IANA special-purpose prefix %s',
+    async (ip) => {
+      expect(() => assertSafeResolverIp(ip)).toThrow(/SSRF_BLOCKED/);
+      dnsBoundary.lookup.mockResolvedValue([
+        { address: '8.8.8.8', family: 4 },
+        { address: ip, family: 6 },
+      ]);
+      await expect(resolveSafeHost('example.test')).rejects.toThrow(/SSRF_BLOCKED/);
+      await expect(assertSafeUrl(`https://[${ip}]/`)).rejects.toThrow(/SSRF_BLOCKED/);
+    },
+  );
+
   it('does not over-block public IPv6 sharing leading hex with reserved ranges', () => {
-    // fec0::/10 (site-local, deprecated) is NOT in our blocklist and is a public-routing-table
-    // address today; a naive startsWith('fe') would wrongly reject it. 2606:… starts with no
-    // reserved prefix. Guard against prefix-substring false positives.
-    for (const ip of ['2606:4700:4700::1111', 'fec0::1', '2a00:1450:4001::1']) {
+    for (const ip of ['2606:4700:4700::1111', '2001:4860:4860::8888', '2a00:1450:4001::1']) {
       expect(() => assertSafeResolverIp(ip), ip).not.toThrow();
     }
   });
@@ -106,6 +143,8 @@ describe('assertSafeUrl', () => {
   it('rejects non-http(s) schemes', async () => {
     await expect(assertSafeUrl('file:///etc/passwd')).rejects.toThrow(/Scheme/);
     await expect(assertSafeUrl('ftp://example.com')).rejects.toThrow(/Scheme/);
+    process.env.ATTACKSURFACE_ALLOW_PRIVATE_TARGETS = 'true';
+    await expect(assertSafeUrl('file:///etc/passwd')).rejects.toThrow(/Scheme/);
   });
 
   it('rejects a malformed URL', async () => {

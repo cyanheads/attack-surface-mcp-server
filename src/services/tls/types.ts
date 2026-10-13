@@ -43,6 +43,10 @@ export interface TlsResult {
   handshakeError: string | null;
   /** Host inspected. */
   host: string;
+  /** Whether the raw leaf matches the requested hostname/IP; null when unverifiable. */
+  identityAuthorized: boolean | null;
+  /** Requested-identity mismatch or verification error, or null. */
+  identityError: string | null;
   /** Port inspected. */
   port: number;
   /** Negotiated protocol (e.g. "TLSv1.3"), or null when the handshake failed. */

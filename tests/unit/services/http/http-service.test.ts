@@ -5,6 +5,10 @@
 
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const dnsBoundary = vi.hoisted(() => ({ lookup: vi.fn() }));
+vi.mock('node:dns/promises', () => ({ lookup: dnsBoundary.lookup }));
+
 import { HttpService } from '@/services/http/http-service.js';
 
 describe('HttpService', () => {
@@ -12,6 +16,7 @@ describe('HttpService', () => {
 
   beforeEach(() => {
     fetchMock.mockReset();
+    dnsBoundary.lookup.mockReset();
     vi.stubGlobal('fetch', fetchMock);
     vi.stubEnv('ATTACKSURFACE_ALLOW_PRIVATE_TARGETS', 'true');
   });
@@ -94,6 +99,7 @@ describe('HttpService', () => {
       ],
       checkedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
       transportError: null,
+      bodyInspection: { status: 'complete', error: null },
     });
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
@@ -257,5 +263,354 @@ describe('HttpService', () => {
     expect(result.technologies).toEqual([
       { name: 'Caddy', category: 'server', evidence: 'server: Caddy' },
     ]);
+  });
+
+  it('characterizes an empty body as usable final headers without body detections', async () => {
+    fetchMock.mockResolvedValue(new Response(null, { headers: { server: 'Caddy' } }));
+    const result = await new HttpService('test').probe(
+      'https://example.com',
+      undefined,
+      1_000,
+      createMockContext(),
+    );
+    expect(result).toMatchObject({
+      finalStatus: 200,
+      transportError: null,
+      technologies: [{ name: 'Caddy', evidence: 'server: Caddy' }],
+    });
+  });
+
+  it('bounds DNS validation before sending any request', async () => {
+    vi.useFakeTimers();
+    vi.stubEnv('ATTACKSURFACE_ALLOW_PRIVATE_TARGETS', 'false');
+    let finishDns!: (addresses: { address: string; family: number }[]) => void;
+    dnsBoundary.lookup.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishDns = resolve;
+        }),
+    );
+    fetchMock.mockResolvedValue(new Response(null));
+    let settled = false;
+    const pending = new HttpService('test')
+      .probe('https://example.com', undefined, 1_000, createMockContext())
+      .then((result) => {
+        settled = true;
+        return result;
+      });
+    try {
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(settled).toBe(true);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(await pending).toMatchObject({
+        finalStatus: 0,
+        bodyInspection: { status: 'not_read', error: null },
+        transportError: expect.any(String),
+      });
+    } finally {
+      finishDns([{ address: '8.8.8.8', family: 4 }]);
+      await pending;
+    }
+  });
+
+  it('shares one deadline across successive redirects', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockImplementation(
+      async (_url, init) =>
+        new Promise((resolve, reject) => {
+          const timer = setTimeout(
+            () => resolve(new Response(null, { status: 302, headers: { location: '/next' } })),
+            400,
+          );
+          init?.signal?.addEventListener(
+            'abort',
+            () => {
+              clearTimeout(timer);
+              reject(init.signal?.reason);
+            },
+            { once: true },
+          );
+        }),
+    );
+    let settled = false;
+    const pending = new HttpService('test')
+      .probe('https://example.com', undefined, 1_000, createMockContext())
+      .then((result) => {
+        settled = true;
+        return result;
+      });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect.soft(settled).toBe(true);
+    await vi.runAllTimersAsync();
+    expect(await pending).toMatchObject({
+      finalStatus: 0,
+      transportError: 'The operation was aborted',
+      bodyInspection: { status: 'not_read', error: null },
+      redirectChain: [
+        { url: 'https://example.com', status: 302, location: '/next' },
+        { url: 'https://example.com/next', status: 302, location: '/next' },
+      ],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(['deadline', 'caller'])(
+    'settles a stalled body on %s even when cleanup does not resolve',
+    async (cause) => {
+      vi.useFakeTimers();
+      const cancel = vi.fn(() => new Promise<void>(() => {}));
+      fetchMock.mockResolvedValue(
+        new Response(new ReadableStream({ cancel }), { headers: { server: 'nginx' } }),
+      );
+      const controller = new AbortController();
+      let settled = false;
+      const pending = new HttpService('test')
+        .probe(
+          'https://example.com',
+          undefined,
+          1_000,
+          createMockContext({ signal: controller.signal }),
+        )
+        .then(
+          (result) => {
+            settled = true;
+            return result;
+          },
+          (err: unknown) => {
+            settled = true;
+            return err;
+          },
+        );
+      await vi.advanceTimersByTimeAsync(0);
+      if (cause === 'caller') controller.abort(new Error('caller stopped'));
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(settled).toBe(true);
+      const result = await pending;
+      if (cause === 'caller') expect(result).toBe(controller.signal.reason);
+      else
+        expect(result).toMatchObject({
+          finalStatus: 200,
+          transportError: null,
+          headers: { server: 'nginx' },
+          bodyInspection: { status: 'failed', error: expect.any(String) },
+          technologies: [{ name: 'nginx' }],
+        });
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('discloses body errors without losing final headers or header fingerprints', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(new Error('body interrupted'));
+          },
+        }),
+        { status: 404, headers: { server: 'Caddy' } },
+      ),
+    );
+    const result = await new HttpService('test').probe(
+      'https://example.com',
+      undefined,
+      1_000,
+      createMockContext(),
+    );
+    expect(result).toMatchObject({
+      finalStatus: 404,
+      transportError: null,
+      bodyInspection: { status: 'failed', error: 'body interrupted' },
+      technologies: [{ name: 'Caddy' }],
+    });
+  });
+
+  it.each([0, 63_999, 64_000, 64_001])(
+    'discloses observed body completion at %i bytes',
+    async (bytes) => {
+      fetchMock.mockResolvedValue(new Response('x'.repeat(bytes)));
+      const result = await new HttpService('test').probe(
+        'https://example.com',
+        undefined,
+        1_000,
+        createMockContext(),
+      );
+      expect(result).toMatchObject({
+        bodyInspection: { status: bytes < 64_000 ? 'complete' : 'limited', error: null },
+      });
+    },
+  );
+
+  it('characterizes supported security-header and assigned cookie-flag controls', async () => {
+    fetchMock.mockResolvedValue(
+      new Response('', {
+        headers: {
+          'strict-transport-security': 'max-age=31536000',
+          'x-frame-options': 'SAMEORIGIN',
+          'x-content-type-options': 'nosniff',
+          'content-security-policy': "frame-ancestors 'none'",
+          'set-cookie': 'session=x; Secure=value; HttpOnly=value; SameSite=Lax',
+        },
+      }),
+    );
+    const result = await new HttpService('test').probe(
+      'https://example.com',
+      undefined,
+      1_000,
+      createMockContext(),
+    );
+    expect(result.securityAudit.findings).toEqual([]);
+    expect(result.securityAudit.cookies).toEqual([
+      { name: 'session', secure: true, httpOnly: true, sameSite: 'Lax' },
+    ]);
+  });
+
+  it('rejects prefix cookie attributes and reports SameSite None without Secure', async () => {
+    fetchMock.mockResolvedValue(
+      new Response('', {
+        headers: { 'set-cookie': 'session=x; Securely; HttpOnlyish; SameSite=None' },
+      }),
+    );
+    const result = await new HttpService('test').probe(
+      'https://example.com',
+      undefined,
+      1_000,
+      createMockContext(),
+    );
+    expect(result.securityAudit.cookies).toEqual([
+      { name: 'session', secure: false, httpOnly: false, sameSite: 'None' },
+    ]);
+    expect(result.securityAudit.findings).toContain(
+      'Cookie "session" uses SameSite=None without Secure; modern browsers reject it.',
+    );
+  });
+
+  it.each([
+    ['SameSite=Strict; SameSite=lAx', 'Lax', false],
+    ['SameSite=Lax; SameSite=unexpected', 'unexpected', true],
+    ['SameSite=Lax; SameSite=', '', true],
+    ['SameSite=Lax; SameSite=__proto__', '__proto__', true],
+    ['SameSite=Lax; SameSite=toString', 'toString', true],
+  ])('uses last SameSite attribute: %s', async (attributes, sameSite, invalid) => {
+    fetchMock.mockResolvedValue(
+      new Response('', { headers: { 'set-cookie': `session=x; Secure; HttpOnly; ${attributes}` } }),
+    );
+    const result = await new HttpService('test').probe(
+      'https://example.com',
+      undefined,
+      1_000,
+      createMockContext(),
+    );
+    expect(result.securityAudit.cookies[0]?.sameSite).toBe(sameSite);
+    expect(
+      result.securityAudit.findings.some((finding) => finding.includes('invalid SameSite')),
+    ).toBe(invalid);
+  });
+
+  it.each([
+    ['DENY', true],
+    [' sameorigin ', true],
+    ['DENY, DENY', true],
+    ['DENY, SAMEORIGIN', false],
+    ['ALLOW-FROM https://example.com', false],
+    ['invalid', false],
+  ])('audits X-Frame-Options token %s', async (value, effective) => {
+    fetchMock.mockResolvedValue(new Response('', { headers: { 'x-frame-options': value } }));
+    const result = await new HttpService('test').probe(
+      'https://example.com',
+      undefined,
+      1_000,
+      createMockContext(),
+    );
+    expect(
+      result.securityAudit.findings.some((finding) => finding.startsWith('No clickjacking')),
+    ).toBe(!effective);
+    expect(result.securityAudit.xFrameOptions).toBe(value.trim());
+  });
+
+  it.each([
+    ['nosniff, invalid', true],
+    ['invalid, nosniff', false],
+    [' NoSnIfF ', true],
+    ['invalid', false],
+  ])('audits first nosniff token %s', async (value, effective) => {
+    fetchMock.mockResolvedValue(new Response('', { headers: { 'x-content-type-options': value } }));
+    const result = await new HttpService('test').probe(
+      'https://example.com',
+      undefined,
+      1_000,
+      createMockContext(),
+    );
+    expect(result.securityAudit.findings.some((finding) => finding.includes('nosniff'))).toBe(
+      !effective,
+    );
+  });
+
+  it.each([
+    ["default-src 'self'; report-uri /frame-ancestors", false],
+    ["FRAME-ANCESTORS 'self'", true],
+    ['frame-ancestors', true],
+    ['frame-ancestors *', false],
+    ["frame-ancestors *; frame-ancestors 'none'", false],
+    ["frame-ancestors 'none'; frame-ancestors *", true],
+    ["frame-ancestors *, frame-ancestors 'none'", true],
+    ['frame-ancestors unexpected???', false],
+  ])('audits first frame-ancestors directive within each policy: %s', async (value, effective) => {
+    fetchMock.mockResolvedValue(
+      new Response('', { headers: { 'content-security-policy': value } }),
+    );
+    const result = await new HttpService('test').probe(
+      'https://example.com',
+      undefined,
+      1_000,
+      createMockContext(),
+    );
+    expect(
+      result.securityAudit.findings.some((finding) => finding.startsWith('No clickjacking')),
+    ).toBe(!effective);
+    expect(result.securityAudit.csp).toBe(value);
+  });
+
+  it('does not credit report-only framing restrictions as enforced', async () => {
+    fetchMock.mockResolvedValue(
+      new Response('', {
+        headers: { 'content-security-policy-report-only': "frame-ancestors 'none'" },
+      }),
+    );
+    const result = await new HttpService('test').probe(
+      'https://example.com',
+      undefined,
+      1_000,
+      createMockContext(),
+    );
+    expect(
+      result.securityAudit.findings.some((finding) => finding.startsWith('No clickjacking')),
+    ).toBe(true);
+  });
+
+  it.each([
+    ['max-age=1', true],
+    [' MAX-AGE = "12" ; includeSubDomains', true],
+    ['max-age=0001; extension="a;b"', true],
+    ['max-age=0', false],
+    ['max-age=-1', false],
+    ['max-age=abc', false],
+    ['max-age="12', false],
+    ['max-age=1; max-age=2', false],
+    ['max-age=1; includeSubDomains; includesubdomains', false],
+    ['max-age=1; invalid=()', false],
+  ])('requires valid positive HSTS without duplicate directives: %s', async (value, effective) => {
+    fetchMock.mockResolvedValue(
+      new Response('', { headers: { 'strict-transport-security': value } }),
+    );
+    const result = await new HttpService('test').probe(
+      'https://example.com',
+      undefined,
+      1_000,
+      createMockContext(),
+    );
+    expect(result.securityAudit.findings.some((finding) => finding.startsWith('HSTS'))).toBe(
+      !effective,
+    );
+    expect(result.securityAudit.hsts).toBe(value.trim());
   });
 });

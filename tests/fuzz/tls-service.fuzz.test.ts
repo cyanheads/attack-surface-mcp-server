@@ -13,7 +13,10 @@ const tlsBoundary = vi.hoisted(() => ({
 }));
 const dnsBoundary = vi.hoisted(() => ({ lookup: vi.fn() }));
 
-vi.mock('node:tls', () => ({ connect: tlsBoundary.connect }));
+vi.mock('node:tls', async (original) => ({
+  ...(await original<typeof import('node:tls')>()),
+  connect: tlsBoundary.connect,
+}));
 vi.mock('node:dns/promises', () => ({ lookup: dnsBoundary.lookup }));
 
 import { TlsService } from '@/services/tls/tls-service.js';
@@ -105,6 +108,7 @@ describe('TlsService fuzz', () => {
             cipher: 'TLS_AES_128_GCM_SHA256',
             chainDepth: 2,
             validationAuthorized: true,
+            identityError: expect.any(String),
             handshakeError: null,
           });
           expect(result?.certificate).toMatchObject({
@@ -116,6 +120,7 @@ describe('TlsService fuzz', () => {
               value === '1.3.6.1.5.5.7.3.1' ? `serverAuth (${value})` : value,
             ),
           });
+          expect(result?.identityAuthorized).not.toBe(true);
         },
       ),
       { numRuns: 75 },

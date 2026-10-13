@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/attack-surface-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.1.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Fattack-surface-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/attack-surface-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/attack-surface-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Fattack-surface-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/attack-surface-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -80,6 +80,7 @@ All resource data is also reachable via tools — tool-only clients lose nothing
 
 - Accepts up to 50 hosts; port defaults to 443 and handshake timeout to 8000ms (1000–30000ms).
 - Returns negotiated protocol, cipher, leaf certificate and chain depth, SANs, issuer, validity window, days to expiry, and validation status. Invalid, expired, and self-signed certificates are reported; one host failure becomes a per-host error.
+- Chain trust (`validationAuthorized`/`validationError`) and requested-host identity (`identityAuthorized`/`identityError`) are separate checks. Identity is checked against the raw leaf even for an untrusted chain; an unavailable or unverifiable leaf means unknown identity, with verification errors reported.
 - Unparseable validity bounds retain their raw values and add findings. `daysUntilExpiry` is null only when expiry cannot be parsed; a malformed start date does not erase a known expiry.
 
 ---
@@ -87,7 +88,9 @@ All resource data is also reachable via tools — tool-only clients lose nothing
 ### `attacksurface_probe_http` <sub>tool</sub>
 
 - Accepts one HTTP(S) URL; timeout defaults to 10000ms (1000–30000ms). Follows up to ten redirects with an SSRF check at every hop; a refused target produces `blocked_target`. Another redirect at the limit returns `finalStatus: 0` and a `transportError`.
+- The timeout is one total budget for DNS, redirects, headers, and body inspection. `bodyInspection` reports `complete` only after observed EOF, `limited` at the 64,000-byte prefix cap, `failed` on body failure, or `not_read` without a final response. Body failures retain usable status and headers; caller cancellation propagates.
 - Returns status, redirect chain, headers, security-header findings (HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy, cookie flags, CORS reflection), and technology detections with their triggering evidence.
+- Header findings check supported framing/nosniff tokens, positive valid HSTS, and exact cookie attribute names. CSP analysis covers observed `frame-ancestors` restrictions, not general policy validity. Raw headers remain available alongside findings.
 - Cloudflare server banners identify a CDN; AWS ELB banners identify edge infrastructure (`other`). Neither banner alone establishes WAF protection.
 
 ---
@@ -242,7 +245,7 @@ All variables are optional — the server boots and delivers its keyless core wi
 | `ATTACKSURFACE_HTTP_USER_AGENT` | Default User-Agent for `attacksurface_probe_http` (overridable per call). | `attack-surface-mcp-server/passive-recon (+https://github.com/cyanheads/attack-surface-mcp-server)` |
 | `ATTACKSURFACE_MAX_SUBDOMAINS` | Cap on subdomains resolved during a `map_domain` run — bounds fan-out cost. | `200` |
 | `ATTACKSURFACE_RDAP_BOOTSTRAP_URL` | RDAP bootstrap base URL; override for a private/mirrored RDAP. | `https://rdap.org` |
-| `ATTACKSURFACE_ALLOW_PRIVATE_TARGETS` | Set `true` to disable the SSRF guard for internal-network assessment. **Leave `false` on any public deployment** — it is the safety boundary that keeps the server from being pointed at internal infrastructure. | `false` |
+| `ATTACKSURFACE_ALLOW_PRIVATE_TARGETS` | Set `true` to permit non-public target ranges for trusted internal-network assessment; URL parsing and HTTP(S) scheme checks remain enforced. **Leave `false` on any public deployment.** | `false` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for HTTP server. | `3010` |
 | `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. The server declares `stateless`; a value set here overrides it. Ignored under stdio. | `stateless` |

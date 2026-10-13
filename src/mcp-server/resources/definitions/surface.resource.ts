@@ -13,6 +13,7 @@ import { getServerConfig } from '@/config/server-config.js';
 import { getCtService } from '@/services/ct/ct-service.js';
 import { getDnsService } from '@/services/dns/dns-service.js';
 import { getHttpService } from '@/services/http/http-service.js';
+import type { HttpProbeResult } from '@/services/http/types.js';
 import { getTlsService } from '@/services/tls/tls-service.js';
 import { isValidDomain, normalizeDomain } from '@/utils/validation.js';
 
@@ -23,33 +24,47 @@ const HOST_DETAIL_CAP = 50;
 interface HostSummary {
   addresses: string[];
   host: string;
-  http: { finalStatus: number; securityFindings: string[]; technologies: string[] } | null;
+  http: {
+    finalStatus: number;
+    securityFindings: string[];
+    technologies: string[];
+    bodyInspection: HttpProbeResult['bodyInspection'];
+  } | null;
   tls: {
     protocol: string | null;
     daysUntilExpiry: number | null;
     validationAuthorized: boolean;
+    identityAuthorized: boolean | null;
+    identityError: string | null;
     findings: string[];
   } | null;
 }
 
 /** Bounded-concurrency map. */
-async function pool<T>(items: string[], fn: (item: string) => Promise<T>): Promise<Map<string, T>> {
+async function pool<T>(
+  items: string[],
+  fn: (item: string) => Promise<T>,
+  signal?: AbortSignal,
+): Promise<Map<string, T>> {
   const out = new Map<string, T>();
   let i = 0;
   await Promise.all(
     Array.from({ length: Math.min(CONCURRENCY, items.length) }, async () => {
       while (i < items.length) {
+        signal?.throwIfAborted();
         const idx = i++;
         const item = items[idx];
         if (!item) continue;
         try {
           out.set(item, await fn(item));
         } catch {
+          signal?.throwIfAborted();
           // per-item failure → absent entry
         }
       }
     }),
   );
+  signal?.throwIfAborted();
   return out;
 }
 
@@ -75,15 +90,21 @@ export const surfaceResource = resource('attacksurface://surface/{domain}', {
 
     const apexSans = await getTlsService()
       .getSans(domain)
-      .catch(() => [] as string[]);
+      .catch(() => {
+        ctx.signal?.throwIfAborted();
+        return [] as string[];
+      });
     const ct = await getCtService()
       .enumerate(domain, ['crt.sh', 'certspotter', 'tls-san'], ctx, apexSans)
-      .catch(() => ({ domain, names: [], sourceStatuses: [] }));
+      .catch(() => {
+        ctx.signal?.throwIfAborted();
+        return { domain, names: [], sourceStatuses: [] };
+      });
 
     const candidates = [...new Set([domain, ...ct.names.map((n) => n.name)])].sort();
     const cap = Math.min(config.maxSubdomains, candidates.length);
     const capped = candidates.slice(0, cap);
-    const liveness = await pool(capped, (h) => dns.resolveAddresses(h));
+    const liveness = await pool(capped, (h) => dns.resolveAddresses(h), ctx.signal);
     const liveNames = capped.filter((h) => (liveness.get(h)?.length ?? 0) > 0);
 
     if (candidates.length === 1 && liveNames.length === 0) {
@@ -95,8 +116,10 @@ export const surfaceResource = resource('attacksurface://surface/{domain}', {
     const detailNames = liveNames.slice(0, HOST_DETAIL_CAP);
     const tlsResults = await getTlsService().inspectHosts(detailNames);
     const tlsByHost = new Map(tlsResults.map((r) => [r.host, r]));
-    const httpResults = await pool(detailNames, (h) =>
-      getHttpService().probe(`https://${h}`, undefined, 10000, ctx),
+    const httpResults = await pool(
+      detailNames,
+      (h) => getHttpService().probe(`https://${h}`, undefined, 10000, ctx),
+      ctx.signal,
     );
 
     const hosts: HostSummary[] = detailNames.map((host) => {
@@ -111,6 +134,8 @@ export const surfaceResource = resource('attacksurface://surface/{domain}', {
                 protocol: tlsR.protocol,
                 daysUntilExpiry: tlsR.certificate?.daysUntilExpiry ?? null,
                 validationAuthorized: tlsR.validationAuthorized,
+                identityAuthorized: tlsR.identityAuthorized,
+                identityError: tlsR.identityError,
                 findings: tlsR.findings,
               }
             : null,
@@ -118,6 +143,7 @@ export const surfaceResource = resource('attacksurface://surface/{domain}', {
           httpR && !httpR.transportError
             ? {
                 finalStatus: httpR.finalStatus,
+                bodyInspection: httpR.bodyInspection,
                 securityFindings: httpR.securityAudit.findings,
                 technologies: httpR.technologies.map(
                   (t) => `${t.name}${t.version ? ` ${t.version}` : ''}`,

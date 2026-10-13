@@ -9,7 +9,7 @@ import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mc
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const dnsBoundary = vi.hoisted(() => ({ resolve: vi.fn() }));
-const tlsBoundary = vi.hoisted(() => ({ connect: vi.fn() }));
+const tlsBoundary = vi.hoisted(() => ({ connect: vi.fn(), san: 'DNS:example.com' }));
 
 vi.mock('node:dns/promises', () => ({
   lookup: vi.fn(),
@@ -23,7 +23,10 @@ vi.mock('node:dns/promises', () => ({
     }
   },
 }));
-vi.mock('node:tls', () => ({ connect: tlsBoundary.connect }));
+vi.mock('node:tls', async (original) => ({
+  ...(await original<typeof import('node:tls')>()),
+  connect: tlsBoundary.connect,
+}));
 
 import { getServerConfig, resetServerConfig } from '@/config/server-config.js';
 import { surfaceResource } from '@/mcp-server/resources/definitions/surface.resource.js';
@@ -67,7 +70,7 @@ class CertificateSocket extends EventEmitter {
     return {
       subject: { CN: 'example.com' },
       issuer: { CN: 'Example CA' },
-      subjectaltname: 'DNS:example.com',
+      subjectaltname: tlsBoundary.san,
       valid_from: 'Jan 01 00:00:00 2026 GMT',
       valid_to: this.validTo,
       serialNumber: '01',
@@ -90,6 +93,7 @@ describe('attacksurface_map_domain', () => {
     vi.stubGlobal('fetch', fetchMock);
     dnsBoundary.resolve.mockReset();
     tlsBoundary.connect.mockReset();
+    tlsBoundary.san = 'DNS:example.com';
     tlsBoundary.connect.mockImplementation(() => new ErrorTlsSocket());
     const config = getServerConfig();
     initCtService(config);
@@ -99,6 +103,7 @@ describe('attacksurface_map_domain', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
   });
@@ -254,6 +259,183 @@ describe('attacksurface_map_domain', () => {
         reason: 'no_surface',
         recovery: { hint: expect.stringContaining('resolve_dns') },
       },
+    });
+  });
+
+  it('carries identity status and mismatch findings through mapped and resource summaries', async () => {
+    tlsBoundary.san = 'DNS:other.example.com';
+    tlsBoundary.connect.mockImplementation(
+      (_options, callback) => new CertificateSocket('Jan 01 00:00:00 2030 GMT', callback),
+    );
+    dnsBoundary.resolve.mockImplementation(async (type, host) =>
+      type === 'A' && host === 'example.com' ? ['93.184.216.34'] : [],
+    );
+    fetchMock.mockImplementation(async (input) => {
+      const origin = new URL(String(input)).origin;
+      if (origin === 'https://crt.sh' || origin === 'https://api.certspotter.com')
+        return Response.json([]);
+      return new Response('');
+    });
+    const result = await runToolContract(mapDomainTool, {
+      domain: 'example.com',
+      includeRegistration: false,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      liveHosts: [
+        {
+          tls: {
+            validationAuthorized: true,
+            identityAuthorized: false,
+            identityError: expect.any(String),
+          },
+        },
+      ],
+      assessment: expect.arrayContaining([
+        expect.stringContaining('Certificate identity did not match'),
+      ]),
+    });
+    expect(JSON.stringify(result.content)).toContain('identityAuthorized=false');
+    expect(JSON.stringify(result.content)).toContain('Certificate identity did not match');
+    const resource = await surfaceResource.handler({ domain: 'example.com' }, createMockContext());
+    expect(resource).toMatchObject({
+      hosts: [
+        {
+          tls: {
+            identityAuthorized: false,
+            identityError: expect.any(String),
+            findings: expect.arrayContaining([
+              expect.stringContaining('Certificate identity did not match'),
+            ]),
+          },
+        },
+      ],
+    });
+  });
+
+  it.each(['limited', 'failed'])(
+    'carries %s body inspection through map and resource summaries',
+    async (status) => {
+      dnsBoundary.resolve.mockImplementation(async (type) =>
+        type === 'A' ? ['93.184.216.34'] : [],
+      );
+      fetchMock.mockImplementation(async (input) => {
+        const origin = new URL(String(input)).origin;
+        if (origin === 'https://crt.sh' || origin === 'https://api.certspotter.com')
+          return Response.json([]);
+        const body =
+          status === 'failed'
+            ? new ReadableStream({
+                start(controller) {
+                  controller.error(new Error('body interrupted'));
+                },
+              })
+            : 'x'.repeat(64_000);
+        return new Response(body, { headers: { server: 'Caddy' } });
+      });
+      const result = await runToolContract(mapDomainTool, {
+        domain: 'example.com',
+        includeRegistration: false,
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        liveHosts: [{ http: { bodyInspection: { status }, technologies: [{ name: 'Caddy' }] } }],
+      });
+      expect(JSON.stringify(result.content)).toContain(`Body inspection: ${status}`);
+      const resource = await surfaceResource.handler(
+        { domain: 'example.com' },
+        createMockContext(),
+      );
+      expect(resource).toMatchObject({ hosts: [{ http: { bodyInspection: { status } } }] });
+    },
+  );
+
+  it.each(['map', 'resource'])(
+    'propagates cancellation past %s aggregation catches',
+    async (surface) => {
+      vi.useFakeTimers();
+      dnsBoundary.resolve.mockImplementation(async (type) =>
+        type === 'A' ? ['93.184.216.34'] : [],
+      );
+      let bodyStarted!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        bodyStarted = resolve;
+      });
+      fetchMock.mockImplementation(async (input) => {
+        const origin = new URL(String(input)).origin;
+        if (origin === 'https://crt.sh' || origin === 'https://api.certspotter.com')
+          return Response.json([]);
+        bodyStarted();
+        return new Response(new ReadableStream());
+      });
+      const controller = new AbortController();
+      if (surface === 'map') {
+        const pending = runToolContract(
+          mapDomainTool,
+          { domain: 'example.com', includeRegistration: false },
+          { context: { signal: controller.signal } },
+        );
+        await ready;
+        await vi.advanceTimersByTimeAsync(0);
+        controller.abort();
+        const result = await pending;
+        expect(result.structuredContent).toMatchObject({
+          error: { code: JsonRpcErrorCode.RequestCancelled },
+        });
+        expect(JSON.stringify(result.content)).toMatch(/cancel|abort/i);
+      } else {
+        const pending = surfaceResource.handler(
+          { domain: 'example.com' },
+          createMockContext({ signal: controller.signal }),
+        );
+        const rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+        await ready;
+        await vi.advanceTimersByTimeAsync(0);
+        controller.abort();
+        await rejected;
+      }
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('propagates ineffective header findings into mapped assessment and resource posture', async () => {
+    dnsBoundary.resolve.mockImplementation(async (type) => (type === 'A' ? ['93.184.216.34'] : []));
+    fetchMock.mockImplementation(async (input) => {
+      const origin = new URL(String(input)).origin;
+      if (origin === 'https://crt.sh' || origin === 'https://api.certspotter.com')
+        return Response.json([]);
+      return new Response('', {
+        headers: {
+          'x-frame-options': 'invalid',
+          'x-content-type-options': 'invalid',
+          'strict-transport-security': 'max-age=0',
+        },
+      });
+    });
+    const result = await runToolContract(mapDomainTool, {
+      domain: 'example.com',
+      includeRegistration: false,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      assessment: expect.arrayContaining([
+        expect.stringContaining('No clickjacking'),
+        expect.stringContaining('HSTS does not contain'),
+      ]),
+    });
+    expect(JSON.stringify(result.content)).toContain('No clickjacking');
+    const resource = await surfaceResource.handler({ domain: 'example.com' }, createMockContext());
+    expect(resource).toMatchObject({
+      hosts: [
+        {
+          http: {
+            securityFindings: expect.arrayContaining([
+              expect.stringContaining('No clickjacking'),
+              expect.stringContaining('HSTS does not contain'),
+            ]),
+          },
+        },
+      ],
     });
   });
 });

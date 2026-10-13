@@ -47,6 +47,14 @@ const LiveHostSchema = z
           .boolean()
           .describe('Whether the chain validated against the trust store.'),
         findings: z.array(z.string()).describe('TLS posture findings.'),
+        identityAuthorized: z
+          .boolean()
+          .nullable()
+          .describe('Whether the leaf matches the requested host, or null when unverifiable.'),
+        identityError: z
+          .string()
+          .nullable()
+          .describe('Requested-identity mismatch or verification error, or null.'),
       })
       .nullable()
       .describe(
@@ -56,6 +64,16 @@ const LiveHostSchema = z
       .object({
         finalStatus: z.number().describe('Final HTTP status after redirects.'),
         finalUrl: z.string().describe('Final URL after redirects.'),
+        bodyInspection: z
+          .object({
+            status: z
+              .enum(['complete', 'limited', 'failed', 'not_read'])
+              .describe('Observed body inspection state.'),
+            error: z.string().nullable().describe('Body inspection failure reason, or null.'),
+          })
+          .describe(
+            'Body completeness; limited means the prefix cap was reached without observing EOF.',
+          ),
         securityFindings: z.array(z.string()).describe('Security-header findings.'),
         technologies: z
           .array(
@@ -166,10 +184,14 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
     // Step 1 — CT enumeration (always). TLS-SAN source needs the apex's SANs.
     const apexSans = await getTlsService()
       .getSans(domain)
-      .catch(() => [] as string[]);
+      .catch(() => {
+        ctx.signal?.throwIfAborted();
+        return [] as string[];
+      });
     const ct = await getCtService()
       .enumerate(domain, ['crt.sh', 'certspotter', 'tls-san'], ctx, apexSans)
       .catch((err) => {
+        ctx.signal?.throwIfAborted();
         notes.push(`CT enumeration failed: ${err instanceof Error ? err.message : String(err)}`);
         return { domain, names: [], sourceStatuses: [] };
       });
@@ -191,7 +213,11 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
       );
     }
 
-    const liveness = await resolveWithPool(capped, (host) => dns.resolveAddresses(host));
+    const liveness = await resolveWithPool(
+      capped,
+      (host) => dns.resolveAddresses(host),
+      ctx.signal,
+    );
     const liveNames = capped.filter((h) => (liveness.get(h)?.length ?? 0) > 0);
     const unresolved = capped.filter((h) => (liveness.get(h)?.length ?? 0) === 0);
 
@@ -217,6 +243,7 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
     if (input.depth !== 'quick') {
       // Steps 3–5 — DNS records (apex), TLS + HTTP per live host (parallel, allSettled).
       await Promise.allSettled([enrichTls(liveHosts), enrichHttp(liveHosts, ctx)]);
+      ctx.signal?.throwIfAborted();
       collectAssessment(liveHosts, assessment);
 
       // Step 6 — registration (apex) when requested.
@@ -227,6 +254,7 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
           if (reg.notes.length > 0) notes.push(...reg.notes);
           assessExpiry(reg.registration, assessment);
         } catch (err) {
+          ctx.signal?.throwIfAborted();
           notes.push(
             `Registration lookup failed: ${err instanceof Error ? err.message : String(err)}`,
           );
@@ -294,12 +322,15 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
       lines.push(`**Addresses:** ${h.addresses.join(', ')}`);
       if (h.tls) {
         lines.push(
-          `**TLS:** ${h.tls.protocol ?? 'unknown'} / ${h.tls.cipher ?? 'unknown'} · issuer ${h.tls.issuer ?? 'unknown'} · ${h.tls.daysUntilExpiry ?? 'unknown'} days left · validationAuthorized=${h.tls.validationAuthorized}`,
+          `**TLS:** ${h.tls.protocol ?? 'unknown'} / ${h.tls.cipher ?? 'unknown'} · issuer ${h.tls.issuer ?? 'unknown'} · ${h.tls.daysUntilExpiry ?? 'unknown'} days left · validationAuthorized=${h.tls.validationAuthorized} · identityAuthorized=${h.tls.identityAuthorized ?? 'unknown'} · identityError=${h.tls.identityError ?? 'none'}`,
         );
         if (h.tls.findings.length > 0) lines.push(`  - ${h.tls.findings.join(' ')}`);
       }
       if (h.http) {
         lines.push(`**HTTP:** ${h.http.finalStatus} → ${h.http.finalUrl}`);
+        lines.push(
+          `  - Body inspection: ${h.http.bodyInspection.status} (${h.http.bodyInspection.error ?? 'no error'})`,
+        );
         if (h.http.technologies.length > 0) {
           lines.push(
             `  - Tech: ${h.http.technologies.map((t) => `${t.name}${t.version ? ` ${t.version}` : ''} (${t.category})`).join(', ')}`,
@@ -334,22 +365,26 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
 async function resolveWithPool<T>(
   hosts: string[],
   fn: (host: string) => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<Map<string, T>> {
   const out = new Map<string, T>();
   let index = 0;
   const workers = Array.from({ length: Math.min(CONCURRENCY, hosts.length) }, async () => {
     while (index < hosts.length) {
+      signal?.throwIfAborted();
       const i = index++;
       const host = hosts[i];
       if (!host) continue;
       try {
         out.set(host, await fn(host));
       } catch {
+        signal?.throwIfAborted();
         // Per-host failure is recorded as an empty/absent result by the caller.
       }
     }
   });
   await Promise.all(workers);
+  signal?.throwIfAborted();
   return out;
 }
 
@@ -374,6 +409,8 @@ async function enrichTls(hosts: LiveHost[]): Promise<void> {
       issuer: r.certificate?.issuerCommonName ?? null,
       daysUntilExpiry: r.certificate?.daysUntilExpiry ?? null,
       validationAuthorized: r.validationAuthorized,
+      identityAuthorized: r.identityAuthorized,
+      identityError: r.identityError,
       findings: r.findings,
     };
   }
@@ -385,6 +422,7 @@ async function enrichHttp(hosts: LiveHost[], ctx: Context): Promise<void> {
   const results = await resolveWithPool(
     hosts.map((h) => h.host),
     (host) => http.probe(`https://${host}`, undefined, 10000, ctx),
+    ctx.signal,
   );
   for (const h of hosts) {
     const r: HttpProbeResult | undefined = results.get(h.host);
@@ -392,6 +430,7 @@ async function enrichHttp(hosts: LiveHost[], ctx: Context): Promise<void> {
     h.http = {
       finalStatus: r.finalStatus,
       finalUrl: r.finalUrl,
+      bodyInspection: r.bodyInspection,
       securityFindings: r.securityAudit.findings,
       technologies: r.technologies.map((t) => ({
         name: t.name,
@@ -406,7 +445,7 @@ async function enrichHttp(hosts: LiveHost[], ctx: Context): Promise<void> {
 async function enrichShodan(hosts: LiveHost[], ctx: Context, notes: string[]): Promise<void> {
   const shodan = getShodanService();
   const distinctIps = [...new Set(hosts.flatMap((h) => h.addresses))];
-  const byIp = await resolveWithPool(distinctIps, (ip) => shodan.lookupHost(ip, ctx));
+  const byIp = await resolveWithPool(distinctIps, (ip) => shodan.lookupHost(ip, ctx), ctx.signal);
   let enriched = 0;
   for (const h of hosts) {
     const hit = h.addresses

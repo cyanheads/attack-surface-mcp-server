@@ -22,7 +22,13 @@ const tlsBoundary = vi.hoisted(() => ({
 }));
 const dnsBoundary = vi.hoisted(() => ({ lookup: vi.fn() }));
 
-vi.mock('node:tls', () => ({ connect: tlsBoundary.connect }));
+vi.mock('node:tls', async (original) => {
+  const actual = await original<typeof import('node:tls')>();
+  return {
+    ...actual,
+    connect: tlsBoundary.connect,
+  };
+});
 vi.mock('node:dns/promises', () => ({ lookup: dnsBoundary.lookup }));
 
 import { inspectTlsTool } from '@/mcp-server/tools/definitions/inspect-tls.tool.js';
@@ -136,6 +142,8 @@ describe('TlsService', () => {
       chainDepth: 2,
       validationAuthorized: false,
       validationError: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+      identityAuthorized: true,
+      identityError: null,
       findings: [
         'Certificate expires in 20 day(s) — renew soon.',
         'Chain did not validate: UNABLE_TO_VERIFY_LEAF_SIGNATURE.',
@@ -152,6 +160,65 @@ describe('TlsService', () => {
       }),
       expect.any(Function),
     );
+  });
+
+  it.each([
+    ['secure.example.com', true, true],
+    ['93.184.216.34', true, true],
+    ['different.example.com', true, false],
+    ['secure.example.com', false, true],
+    ['different.example.com', false, false],
+  ])(
+    'checks requested identity %s independently of chain trust %s',
+    async (host, trusted, matches) => {
+      tlsBoundary.scenarios.push({
+        mode: 'success',
+        certificate: certificate(),
+        authorized: trusted,
+      });
+      const [result] = await new TlsService().inspectHosts([host]);
+      expect(result).toMatchObject({
+        validationAuthorized: trusted,
+        identityAuthorized: matches,
+        handshakeError: null,
+      });
+      expect(result?.identityError === null).toBe(matches);
+      if (!matches)
+        expect(result?.findings).toContain(
+          `Certificate identity did not match: ${result?.identityError}.`,
+        );
+    },
+  );
+
+  it('reports identity as unknown without a peer certificate', async () => {
+    tlsBoundary.scenarios.push({ mode: 'success' });
+    const [result] = await new TlsService().inspectHosts(['secure.example.com']);
+    expect(result).toMatchObject({
+      certificate: null,
+      identityAuthorized: null,
+      identityError: null,
+    });
+  });
+
+  it('keeps leaf and chain posture when the native identity checker cannot verify a certificate', async () => {
+    tlsBoundary.scenarios.push({
+      mode: 'success',
+      certificate: certificate({ subjectaltname: 'DNS:"unterminated' }),
+      authorized: true,
+    });
+    const [result] = await new TlsService().inspectHosts(['secure.example.com']);
+    expect(result).toMatchObject({
+      validationAuthorized: true,
+      certificate: { serialNumber: '01AB' },
+      identityAuthorized: null,
+      identityError: 'Invalid subject alternative name string',
+      handshakeError: null,
+    });
+    expect(result?.findings).toContain(
+      'Certificate identity could not be verified: Invalid subject alternative name string.',
+    );
+    expect(vi.getTimerCount()).toBe(0);
+    expect({ results: [result] }).toEqual(expect.schemaMatching(inspectTlsTool.output));
   });
 
   it('preserves malformed certificate dates as unknown instead of returning NaN', async () => {
@@ -259,6 +326,7 @@ describe('TlsService', () => {
     const leaf = certificate({
       subject: { CN: 'legacy.example.com' },
       issuer: { CN: 'legacy.example.com' },
+      subjectaltname: 'DNS:legacy.example.com',
       valid_to: 'Dec 25 00:00:00 2025 GMT',
     });
     leaf.issuerCertificate = leaf;
@@ -316,5 +384,15 @@ describe('TlsService', () => {
 
     await expect(new TlsService().getSans('internal.example.com')).resolves.toEqual([]);
     expect(tlsBoundary.connect).not.toHaveBeenCalled();
+  });
+
+  it('creates no socket for equivalent non-public IPv6 literals', async () => {
+    vi.stubEnv('ATTACKSURFACE_ALLOW_PRIVATE_TARGETS', 'false');
+    const results = await new TlsService().inspectHosts(['0:0:0:0:0:0:0:1', '2001:db8::1']);
+    expect(results.every((result) => result.handshakeError?.startsWith('SSRF_BLOCKED:'))).toBe(
+      true,
+    );
+    expect(tlsBoundary.connect).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

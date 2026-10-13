@@ -61,6 +61,14 @@ const TlsResultSchema = z
       .array(z.string())
       .describe('Posture findings (expiry windows, weak protocol, self-signed, etc.).'),
     checkedAt: z.string().describe('ISO 8601 timestamp of the inspection.'),
+    identityAuthorized: z
+      .boolean()
+      .nullable()
+      .describe('Whether the leaf matches the requested hostname/IP, or null when unverifiable.'),
+    identityError: z
+      .string()
+      .nullable()
+      .describe('Requested-identity mismatch or verification error, or null.'),
     handshakeError: z
       .string()
       .nullable()
@@ -71,7 +79,7 @@ const TlsResultSchema = z
 export const inspectTlsTool = tool('attacksurface_inspect_tls', {
   title: 'attacksurface_inspect_tls',
   description:
-    'Inspect TLS/SSL posture for one or more hosts via a real read-only handshake: negotiated protocol and cipher, leaf certificate and chain depth, SANs, validity window, days-to-expiry, issuer, and validation status. Invalid, expired, and self-signed certificates are inspected and reported. Unparseable validity bounds retain their raw values and add findings; an unknown expiry returns null days-to-expiry. One handshake per host; no application data is sent. SSRF-guarded; per-host failures degrade to a per-host error.',
+    'Inspect TLS/SSL posture for one or more hosts via a real read-only handshake: negotiated protocol and cipher, leaf certificate and chain depth, SANs, validity window, days-to-expiry, issuer, chain trust, and requested-host identity. Identity is checked independently of chain trust; mismatches and unverifiable identity add findings. Invalid, expired, and self-signed certificates are inspected and reported. Unparseable validity bounds retain their raw values and add findings; an unknown expiry returns null days-to-expiry. One handshake per host; no application data is sent. SSRF-guarded; per-host failures degrade to a per-host error.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
   input: z.object({
     hosts: z
@@ -133,6 +141,9 @@ export const inspectTlsTool = tool('attacksurface_inspect_tls', {
         `**Validation:** ${r.validationAuthorized ? 'trusted chain' : 'not trusted'} (${r.validationError ?? 'no error'}) | **Chain depth:** ${r.chainDepth}`,
       );
       const c = r.certificate;
+      lines.push(
+        `**Identity:** ${r.identityAuthorized === null ? 'unknown' : r.identityAuthorized ? 'matches requested host' : 'does not match requested host'} (${r.identityError ?? 'no error'})`,
+      );
       lines.push(`**Subject:** ${c?.subjectCommonName ?? 'none presented'}`);
       lines.push(
         `**Issuer:** ${c?.issuerCommonName ?? 'unknown'} (${c?.issuerOrganization ?? 'no org'})`,

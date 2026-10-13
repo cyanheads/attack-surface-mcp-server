@@ -164,10 +164,22 @@ function inspectOne(
         const rawCert = socket.getPeerCertificate(true);
         let certificate: CertInfo | null = null;
         let chainDepth = 0;
+        let identityAuthorized: boolean | null = null;
+        let identityError: string | null = null;
         if (rawCert && Object.keys(rawCert).length > 0 && rawCert.subject) {
           const built = buildCertInfo(rawCert, host, findings);
           certificate = built.info;
           chainDepth = built.chainDepth;
+          try {
+            const mismatch = tls.checkServerIdentity(host, rawCert);
+            identityAuthorized = mismatch === undefined;
+            identityError = mismatch?.message ?? null;
+            if (identityError)
+              findings.push(`Certificate identity did not match: ${identityError}.`);
+          } catch (err) {
+            identityError = err instanceof Error ? err.message : String(err);
+            findings.push(`Certificate identity could not be verified: ${identityError}.`);
+          }
         }
 
         const authorized = socket.authorized;
@@ -185,6 +197,8 @@ function inspectOne(
           chainDepth,
           validationAuthorized: authorized,
           validationError: authError ? String(authError) : null,
+          identityAuthorized,
+          identityError,
           findings,
           checkedAt,
           handshakeError: null,
@@ -204,6 +218,8 @@ function inspectOne(
         validationAuthorized: false,
         validationError: null,
         findings: ['Connection timed out.'],
+        identityAuthorized: null,
+        identityError: null,
         checkedAt,
         handshakeError: `TLS handshake timed out after ${timeoutMs}ms.`,
       });
@@ -220,6 +236,8 @@ function inspectOne(
         validationAuthorized: false,
         validationError: null,
         findings: [`Connection error: ${err.message}`],
+        identityAuthorized: null,
+        identityError: null,
         checkedAt,
         handshakeError: err.message,
       });
@@ -253,6 +271,8 @@ export class TlsService {
             validationAuthorized: false,
             validationError: null,
             findings: [(r.reason as Error).message],
+            identityAuthorized: null,
+            identityError: null,
             checkedAt: new Date().toISOString(),
             handshakeError: (r.reason as Error).message,
           },

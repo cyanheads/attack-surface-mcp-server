@@ -15,7 +15,10 @@ interface Scenario {
 }
 
 const tlsBoundary = vi.hoisted(() => ({ connect: vi.fn(), scenarios: [] as Scenario[] }));
-vi.mock('node:tls', () => ({ connect: tlsBoundary.connect }));
+vi.mock('node:tls', async (original) => ({
+  ...(await original<typeof import('node:tls')>()),
+  connect: tlsBoundary.connect,
+}));
 
 import { inspectTlsTool } from '@/mcp-server/tools/definitions/inspect-tls.tool.js';
 import { initTlsService } from '@/services/tls/tls-service.js';
@@ -215,7 +218,9 @@ describe('attacksurface_inspect_tls', () => {
             daysUntilExpiry: null,
             subjectAltNames: ['secure.example.com', 'www.example.com'],
           },
-          findings: ['Certificate not-after date could not be parsed; expiry is unknown.'],
+          findings: expect.arrayContaining([
+            'Certificate not-after date could not be parsed; expiry is unknown.',
+          ]),
         },
         {
           host: 'secure.example.com',
@@ -246,6 +251,43 @@ describe('attacksurface_inspect_tls', () => {
         recovery: { hint: expect.stringContaining('bare hostnames') },
       },
     });
+    expect(tlsBoundary.connect).not.toHaveBeenCalled();
+  });
+
+  it('renders requested identity mismatches independently of trusted chains on both surfaces', async () => {
+    tlsBoundary.scenarios.push({ mode: 'success' });
+    const result = await runToolContract(inspectTlsTool, { hosts: ['different.example.com'] });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      results: [
+        {
+          validationAuthorized: true,
+          identityAuthorized: false,
+          identityError: expect.any(String),
+          handshakeError: null,
+          findings: expect.arrayContaining([
+            expect.stringContaining('Certificate identity did not match'),
+          ]),
+        },
+      ],
+    });
+    expect(JSON.stringify(result.content)).toContain('does not match requested host');
+    expect(JSON.stringify(result.content)).toContain('Certificate identity did not match');
+  });
+
+  it('returns blocked equivalent IPv6 results without opening a socket on both surfaces', async () => {
+    vi.stubEnv('ATTACKSURFACE_ALLOW_PRIVATE_TARGETS', 'false');
+    const result = await runToolContract(inspectTlsTool, { hosts: ['0:0:0:0:0:0:0:1'] });
+    expect(result.structuredContent).toMatchObject({
+      results: [
+        {
+          certificate: null,
+          identityAuthorized: null,
+          handshakeError: expect.stringContaining('SSRF_BLOCKED'),
+        },
+      ],
+    });
+    expect(JSON.stringify(result.content)).toContain('SSRF_BLOCKED');
     expect(tlsBoundary.connect).not.toHaveBeenCalled();
   });
 

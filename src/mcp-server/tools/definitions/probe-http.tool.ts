@@ -24,7 +24,12 @@ const CookieAuditSchema = z
     name: z.string().describe('Cookie name.'),
     secure: z.boolean().describe('Whether the Secure flag is set.'),
     httpOnly: z.boolean().describe('Whether the HttpOnly flag is set.'),
-    sameSite: z.string().nullable().describe('SameSite attribute value, or null when absent.'),
+    sameSite: z
+      .string()
+      .nullable()
+      .describe(
+        'Canonical Strict/Lax/None, raw invalid value (including empty), or null when absent.',
+      ),
   })
   .describe('Security-flag audit for one Set-Cookie header.');
 
@@ -81,7 +86,9 @@ export const probeHttpTool = tool('attacksurface_probe_http', {
       .min(1000)
       .max(30000)
       .default(10000)
-      .describe('Per-request timeout in milliseconds.'),
+      .describe(
+        'Total probe timeout in milliseconds, including DNS, redirects, and body inspection.',
+      ),
   }),
   output: z.object({
     url: z.string().describe('The initial request URL.'),
@@ -96,6 +103,14 @@ export const probeHttpTool = tool('attacksurface_probe_http', {
     securityAudit: SecurityAuditSchema.describe('Security-header audit.'),
     technologies: z.array(TechDetectionSchema).describe('Technology detections with evidence.'),
     checkedAt: z.string().describe('ISO 8601 timestamp of the probe.'),
+    bodyInspection: z
+      .object({
+        status: z
+          .enum(['complete', 'limited', 'failed', 'not_read'])
+          .describe('Observed EOF, prefix cap reached, body failure, or no final response.'),
+        error: z.string().nullable().describe('Body inspection failure reason, or null.'),
+      })
+      .describe('Body inspection completeness; limited does not imply EOF.'),
     transportError: z
       .string()
       .nullable()
@@ -137,6 +152,9 @@ export const probeHttpTool = tool('attacksurface_probe_http', {
     lines.push(`## ${result.url}`);
     lines.push(`**Error:** ${result.transportError ?? 'none'}`);
     lines.push(`**Final status:** ${result.finalStatus} | **Final URL:** ${result.finalUrl}`);
+    lines.push(
+      `**Body inspection:** ${result.bodyInspection.status} (${result.bodyInspection.error ?? 'no error'})`,
+    );
     lines.push('**Redirect chain:**');
     if (result.redirectChain.length === 0) lines.push('- (none)');
     for (const hop of result.redirectChain) {

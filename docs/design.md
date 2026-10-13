@@ -59,7 +59,7 @@ This composes with the rest of the cyanheads fleet: detected software versions c
 | `ct-service` | crt.sh JSON API (`/json?q=`) + Certspotter issuances API (`api.certspotter.com/v1/issuances`); fallback chain | `enumerate_subdomains`, `map_domain` |
 | `dns-service` | `node:dns/promises` `Resolver` (multi-resolver, `setServers`) + reverse PTR | `resolve_dns`, `enumerate_subdomains`, `map_domain` |
 | `tls-service` | `node:tls` read-only handshake (`rejectUnauthorized: false`) → leaf certificate, chain depth, protocol, cipher | `inspect_tls`, `map_domain` |
-| `http-service` | `fetchWithTimeout` GET + header/cookie parsing + tech-fingerprint ruleset | `probe_http`, `map_domain` |
+| `http-service` | `fetch` GET with one total deadline + header/cookie parsing + tech-fingerprint ruleset | `probe_http`, `map_domain` |
 | `registration-service` | RDAP over `rdap.org` bootstrap (follows 302 redirect to authoritative RR) + WHOIS fallback (`node:net` 43) | `lookup_registration`, `map_domain` |
 | `shodan-service` | Shodan REST (`/shodan/host/{ip}`, `/shodan/host/search`; search may consume query credits) | `lookup_host`, `map_domain` (opportunistic) |
 
@@ -103,13 +103,19 @@ Each step is independently testable.
 | 2 | DNS resolve (per candidate, capped, parallel) | `node:dns` | Mark which candidates are live; collect IPs | always |
 | 3 | DNS records (apex + live hosts) | `node:dns` | A/AAAA/MX/NS/TXT/CAA enumeration | `standard`+ |
 | 4 | TLS handshake (per live host, parallel) | `node:tls` | Cert + protocol/cipher posture | `standard`+ |
-| 5 | HTTP GET (per live host, parallel) | `fetchWithTimeout` | Headers, security-header audit, tech fingerprint | `standard`+ |
+| 5 | HTTP GET (per live host, parallel) | `fetch` with one total deadline | Headers, security-header audit, tech fingerprint | `standard`+ |
 | 6 | RDAP/WHOIS (apex domain) | `rdap.org` | Registration + ownership | when `includeRegistration` |
 | 7 | Shodan host (per distinct IP) | Shodan | Open ports / banners enrichment | `thorough` **and** key present |
 
 `quick` = steps 1–2 only (CT + resolution: "what subdomains exist and which are live"). `standard` = 1–6 (full passive posture). `thorough` = 1–7 (adds Shodan when keyed; silently skips when not — surfaced as a `notes` entry, not an error). All per-host fan-out uses `Promise.allSettled`; the apex `ATTACKSURFACE_MAX_SUBDOMAINS` cap bounds cost and is disclosed via `ctx.enrich.truncated()` when hit. The map's `assessment` block synthesizes only observable facts (expiring certs, missing HSTS/CSP, weak TLS versions, wildcard exposure) — never an exploitation path.
 
 ## Design Decisions
+
+### Address, identity, and HTTP completeness
+- **IPv6 range checks use parsed numeric addresses.** Equivalent compressed, expanded, padded, and recognized IPv4 embeddings receive the same decision. Native IPv6 low bits do not imply an embedded IPv4 target. Every DNS answer is checked before socket-based services pin to a validated address, preferring IPv4; HTTP's portable `fetch` API resolves separately. The private-target opt-out permits non-public ranges while retaining URL and scheme validation.
+- **TLS chain trust and requested-host identity are independent.** `validationAuthorized`/`validationError` describe trust; `identityAuthorized`/`identityError` check the raw leaf against the requested hostname or IP even when the chain is untrusted. Mismatches remain inspectable findings. A verifier error leaves identity unknown. Hostnames retain SNI while IP literals omit it.
+- **HTTP has one total `timeoutMs` budget.** DNS, redirects, headers, body consumption, and cleanup share the budget so a slow body or redirect chain cannot extend it. Usable final status and headers survive body failure; `bodyInspection` distinguishes observed EOF, the 64,000-byte cap, failure, and no final response. Caller cancellation propagates through map/resource aggregation.
+- **Header findings describe selected effective semantics.** Exact cookie attributes and last SameSite values, supported framing/nosniff tokens, parsed CSP framing directives, and valid positive HSTS determine findings. Supported SameSite values use canonical `Strict`/`Lax`/`None`; raw headers preserve original evidence. CSP findings do not claim general policy validity.
 
 ### Source selection — why these, and the fallback chains
 - **CT logs over DNS brute-forcing for subdomains.** Certificate Transparency is fully passive (querying public logs, not touching the target) and high-yield. DNS wordlist brute-forcing — the usual alternative — generates traffic against the target's resolvers and edges toward active probing; it's deliberately excluded. CT is sourced as a **fallback chain**: crt.sh primary (richest), Certspotter fallback (crt.sh 502'd on 3 of 5 live probes during design — it is genuinely unreliable), and the TLS handshake's SAN list as a third, always-available source. Each subdomain carries its `source`. **Verified response shape (both sources):** both crt.sh `/json?q=%.{domain}` and Certspotter `/v1/issuances?domain={domain}&include_subdomains=true&expand=dns_names` return an array with identical fields: `id`, `tbs_sha256`, `cert_sha256`, `dns_names` (string array of SANs), `pubkey_sha256`, `not_before`, `not_after` (ISO-8601 UTC), `revoked` (boolean). Extract subdomain names from `dns_names`; strip wildcard prefix (`*.`) before deduplication.

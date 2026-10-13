@@ -55,7 +55,7 @@ export interface CookieAudit {
   httpOnly: boolean;
   /** Cookie name. */
   name: string;
-  /** SameSite attribute value, or null when absent. */
+  /** Canonical Strict/Lax/None, raw invalid value (including empty), or null when absent. */
   sameSite: string | null;
   /** Whether the Secure flag is set. */
   secure: boolean;
@@ -63,6 +63,8 @@ export interface CookieAudit {
 
 /** Full HTTP probe result for one URL. */
 export interface HttpProbeResult {
+  /** Body inspection state; limited means the prefix cap was reached without observing EOF. */
+  bodyInspection: { status: 'complete' | 'limited' | 'failed' | 'not_read'; error: string | null };
   /** ISO 8601 timestamp of the probe. */
   checkedAt: string;
   /** Final HTTP status code. */
