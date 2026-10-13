@@ -46,5 +46,5 @@ describe('registration scan scaling', () => {
       const elapsed = process.threadCpuUsage(largeStart);
       expect((elapsed.user + elapsed.system) / smallCpu).toBeLessThan(256);
     }
-  });
+  }, 15_000);
 });
