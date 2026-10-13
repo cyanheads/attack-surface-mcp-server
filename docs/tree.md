@@ -1,6 +1,6 @@
 # attack-surface-mcp-server - Directory Structure
 
-Generated on: 2026-10-13 12:43:08
+Generated on: 2026-10-13 13:54:02
 
 ```text
 attack-surface-mcp-server/
@@ -172,6 +172,7 @@ attack-surface-mcp-server/
 │   │   │   ├── http-service.ts
 │   │   │   └── types.ts
 │   │   ├── registration/
+│   │   │   ├── allocations.ts
 │   │   │   ├── registration-service.test.ts
 │   │   │   ├── registration-service.ts
 │   │   │   └── types.ts
@@ -182,6 +183,7 @@ attack-surface-mcp-server/
 │   │       ├── tls-service.ts
 │   │       └── types.ts
 │   ├── utils/
+│   │   ├── literal-text.ts
 │   │   ├── ssrf-guard.test.ts
 │   │   ├── ssrf-guard.ts
 │   │   ├── validation.test.ts
@@ -197,6 +199,7 @@ attack-surface-mcp-server/
 │   ├── integration/
 │   │   ├── enumerate-subdomains.tool.test.ts
 │   │   ├── inspect-tls.tool.test.ts
+│   │   ├── literal-evidence.test.ts
 │   │   ├── lookup-host.tool.test.ts
 │   │   ├── lookup-registration.tool.test.ts
 │   │   ├── map-domain.tool.test.ts
@@ -210,19 +213,22 @@ attack-surface-mcp-server/
 │   │   └── definitions.test.ts
 │   ├── tools/
 │   └── unit/
-│       └── services/
-│           ├── ct/
-│           │   └── ct-service.test.ts
-│           ├── dns/
-│           │   └── dns-service.test.ts
-│           ├── http/
-│           │   └── http-service.test.ts
-│           ├── registration/
-│           │   └── registration-service.test.ts
-│           ├── shodan/
-│           │   └── shodan-service.test.ts
-│           └── tls/
-│               └── tls-service.test.ts
+│       ├── services/
+│       │   ├── ct/
+│       │   │   └── ct-service.test.ts
+│       │   ├── dns/
+│       │   │   └── dns-service.test.ts
+│       │   ├── http/
+│       │   │   └── http-service.test.ts
+│       │   ├── registration/
+│       │   │   ├── allocations.test.ts
+│       │   │   └── registration-service.test.ts
+│       │   ├── shodan/
+│       │   │   └── shodan-service.test.ts
+│       │   └── tls/
+│       │       └── tls-service.test.ts
+│       ├── literal-text.test.ts
+│       └── registration-scaling.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes
