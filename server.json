@@ -12,18 +12,8 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/attack-surface-mcp-server",
-      "runtimeHint": "bun",
+      "runtimeHint": "npx",
       "version": "0.2.3",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:stdio"
-        }
-      ],
       "environmentVariables": [
         {
           "name": "SHODAN_API_KEY",
@@ -68,7 +58,7 @@
         },
         {
           "name": "ATTACKSURFACE_ALLOW_PRIVATE_TARGETS",
-          "description": "Set true to disable the SSRF guard for internal-network assessment (local/trusted deployments only).",
+          "description": "Set true to permit non-public target ranges for trusted internal-network assessment; URL and HTTP(S) scheme checks remain enforced.",
           "format": "string",
           "isRequired": false,
           "default": "false"
@@ -89,19 +79,15 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/attack-surface-mcp-server",
-      "runtimeHint": "bun",
+      "runtimeHint": "npx",
       "version": "0.2.3",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:http"
-        }
-      ],
       "environmentVariables": [
+        {
+          "name": "MCP_TRANSPORT_TYPE",
+          "description": "Selects the HTTP transport.",
+          "format": "string",
+          "value": "http"
+        },
         {
           "name": "MCP_HTTP_HOST",
           "description": "The hostname for the HTTP server.",
