@@ -159,8 +159,8 @@ describe('ShodanService', () => {
   it.each([
     [401, 'rejected the API key'],
     [429, 'rate limit / no query credits'],
-    [500, 'Fetch failed for https://api.shodan.io/shodan/host/8.8.8.8?…. Status: 500'],
-    [503, 'Fetch failed for https://api.shodan.io/shodan/host/8.8.8.8?…. Status: 503'],
+    [500, 'Fetch failed for https://api.shodan.io/…?…. Status: 500'],
+    [503, 'Fetch failed for https://api.shodan.io/…?…. Status: 503'],
   ])('surfaces HTTP %i failures after bounded retries', async (status, message) => {
     vi.useFakeTimers();
     fetchMock.mockImplementation(async () => new Response('', { status }));
