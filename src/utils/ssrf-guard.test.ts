@@ -124,6 +124,18 @@ describe('assertSafeResolverIp', () => {
 });
 
 describe('assertSafeDomain', () => {
+  it('preserves discovery cancellation while the host safety lookup is pending', async () => {
+    dnsBoundary.lookup.mockImplementation(() => new Promise(() => {}));
+    const controller = new AbortController();
+    const domain = assertSafeDomain('example.test', controller.signal);
+    const pinned = resolveSafeHost('example.test', controller.signal);
+    const assertions = Promise.all([
+      expect(domain).rejects.toMatchObject({ name: 'AbortError' }),
+      expect(pinned).rejects.toMatchObject({ name: 'AbortError' }),
+    ]);
+    controller.abort();
+    await assertions;
+  });
   it('rejects a literal private IP without a DNS round-trip', async () => {
     await expect(assertSafeDomain('169.254.169.254')).rejects.toThrow(/SSRF_BLOCKED/);
     await expect(assertSafeDomain('127.0.0.1')).rejects.toThrow(/SSRF_BLOCKED/);

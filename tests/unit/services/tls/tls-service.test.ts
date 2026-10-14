@@ -18,6 +18,7 @@ interface TlsScenario {
 
 const tlsBoundary = vi.hoisted(() => ({
   connect: vi.fn(),
+  destroy: vi.fn(),
   scenarios: [] as TlsScenario[],
 }));
 const dnsBoundary = vi.hoisted(() => ({ lookup: vi.fn() }));
@@ -51,7 +52,9 @@ class FakeTlsSocket extends EventEmitter {
     }
   }
 
-  destroy() {}
+  destroy() {
+    tlsBoundary.destroy();
+  }
 
   getCipher() {
     return this.scenario.cipher ?? {};
@@ -94,6 +97,7 @@ describe('TlsService', () => {
     vi.stubEnv('ATTACKSURFACE_ALLOW_PRIVATE_TARGETS', 'true');
     tlsBoundary.scenarios.length = 0;
     tlsBoundary.connect.mockReset();
+    tlsBoundary.destroy.mockReset();
     dnsBoundary.lookup.mockReset();
     dnsBoundary.lookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
     tlsBoundary.connect.mockImplementation((_options, callback) => {
@@ -378,12 +382,33 @@ describe('TlsService', () => {
     });
   });
 
-  it('returns no SANs when the SSRF guard rejects the host', async () => {
+  it('reports SAN source failure when the SSRF guard rejects the host', async () => {
     vi.stubEnv('ATTACKSURFACE_ALLOW_PRIVATE_TARGETS', 'false');
     dnsBoundary.lookup.mockResolvedValue([{ address: '10.0.0.4', family: 4 }]);
 
-    await expect(new TlsService().getSans('internal.example.com')).resolves.toEqual([]);
+    await expect(new TlsService().getSans('internal.example.com')).rejects.toThrow('SSRF_BLOCKED:');
     expect(tlsBoundary.connect).not.toHaveBeenCalled();
+  });
+
+  it('cancels an in-flight TLS handshake and releases its timer', async () => {
+    tlsBoundary.scenarios.push({ mode: 'timeout' });
+    const controller = new AbortController();
+    const pending = new TlsService().inspectHosts(
+      ['secure.example.com'],
+      443,
+      8000,
+      controller.signal,
+    );
+    const rejection = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tlsBoundary.connect).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tlsBoundary.destroy).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+    await rejection;
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('creates no socket for equivalent non-public IPv6 literals', async () => {

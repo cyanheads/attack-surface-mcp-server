@@ -41,7 +41,7 @@ describe('CtService fuzz', () => {
       fc.asyncProperty(
         fc.array(
           fc.record({
-            dns_names: fc.array(
+            names: fc.array(
               fc
                 .tuple(fc.boolean(), label, fc.boolean())
                 .map(
@@ -54,7 +54,9 @@ describe('CtService fuzz', () => {
           { maxLength: 20 },
         ),
         async (records) => {
-          fetchMock.mockImplementation(async () => Response.json(records));
+          fetchMock.mockImplementation(async () =>
+            Response.json(records.map((record) => ({ name_value: record.names.join('\n') }))),
+          );
 
           const result = await new CtService(config).enumerate(
             'EXAMPLE.COM.',
@@ -63,6 +65,15 @@ describe('CtService fuzz', () => {
           );
 
           expect(result.domain).toBe('example.com');
+          expect(result.names.map(({ name }) => name)).toEqual(
+            [
+              ...new Set(
+                records.flatMap(({ names }) =>
+                  names.map((name) => name.toLowerCase().replace(/^\*\./, '').replace(/\.$/, '')),
+                ),
+              ),
+            ].sort((a, b) => a.localeCompare(b)),
+          );
           expect(result.sourceStatuses).toEqual([
             { source: 'crt.sh', ok: true, count: result.names.length, sourceError: null },
           ]);

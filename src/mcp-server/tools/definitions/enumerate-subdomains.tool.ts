@@ -13,6 +13,8 @@ import { getCtService } from '@/services/ct/ct-service.js';
 import type { CtSource } from '@/services/ct/types.js';
 import { getDnsService } from '@/services/dns/dns-service.js';
 import { getTlsService } from '@/services/tls/tls-service.js';
+import { discoveryPool } from '@/utils/discovery.js';
+import { literalText } from '@/utils/literal-text.js';
 import { isValidDomain, normalizeDomain } from '@/utils/validation.js';
 
 const SourceEnum = z.enum(['crt.sh', 'certspotter', 'tls-san']);
@@ -23,6 +25,10 @@ const SubdomainSchema = z
     sources: z.array(SourceEnum).describe('CT source(s) that surfaced this name.'),
     resolved: z.boolean().describe('True when the name resolved to at least one A/AAAA address.'),
     addresses: z.array(z.string()).describe('Resolved IP addresses (empty when unresolved).'),
+    addressError: z
+      .string()
+      .nullable()
+      .describe('Address-family or blocked-target failure, or null.'),
   })
   .describe('A discovered subdomain with provenance and liveness.');
 
@@ -32,31 +38,18 @@ const SourceStatusSchema = z
     ok: z.boolean().describe('Whether the source answered successfully.'),
     count: z.number().describe('Distinct names this source contributed.'),
     sourceError: z.string().nullable().describe('Source error, or null on success.'),
+    complete: z.boolean().optional().describe('True when paged source coverage was exhausted.'),
+    pagesFetched: z
+      .number()
+      .optional()
+      .describe('Successfully read pages including an empty terminal page.'),
+    incompleteReason: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('Reason paged source coverage stopped, or null.'),
   })
   .describe('Per-source outcome for the enumeration.');
-
-const CONCURRENCY = 12;
-
-/** Resolve liveness for names with a bounded concurrency pool. */
-async function resolveLiveness(names: string[]): Promise<Map<string, string[]>> {
-  const dns = getDnsService();
-  const out = new Map<string, string[]>();
-  let index = 0;
-  const workers = Array.from({ length: Math.min(CONCURRENCY, names.length) }, async () => {
-    while (index < names.length) {
-      const i = index++;
-      const name = names[i];
-      if (!name) continue;
-      try {
-        out.set(name, await dns.resolveAddresses(name));
-      } catch {
-        out.set(name, []);
-      }
-    }
-  });
-  await Promise.all(workers);
-  return out;
-}
 
 export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains', {
   title: 'attacksurface_enumerate_subdomains',
@@ -84,6 +77,18 @@ export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains'
     sourceStatuses: z
       .array(SourceStatusSchema)
       .describe('Per-source outcome (which answered, counts, errors).'),
+    filteredAddressErrors: z
+      .array(
+        z
+          .object({
+            name: z.string().describe('Nonlive candidate excluded by includeUnresolved=false.'),
+            addressError: z.string().describe('Operational address lookup failure.'),
+          })
+          .describe('A filtered candidate with failed address resolution.'),
+      )
+      .describe(
+        'Operational failures for nonlive candidates filtered out of subdomains; empty when none were filtered.',
+      ),
   }),
   enrichment: {
     notice: z
@@ -128,11 +133,24 @@ export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains'
 
     // The TLS-SAN source needs the apex's certificate SANs — fetch opportunistically when requested.
     let sanNames: string[] = [];
+    let sanError: string | null = null;
     if (sources.includes('tls-san')) {
-      sanNames = await getTlsService().getSans(domain);
+      try {
+        sanNames = await getTlsService().getSans(domain, undefined, undefined, ctx.signal);
+      } catch (err) {
+        ctx.signal?.throwIfAborted();
+        sanError = err instanceof Error ? err.message : String(err);
+      }
     }
 
     const ct = await getCtService().enumerate(domain, sources, ctx, sanNames);
+    if (sources.includes('tls-san') && !ct.sourceStatuses.some((s) => s.source === 'tls-san'))
+      ct.sourceStatuses.push({
+        source: 'tls-san',
+        ok: sanError === null,
+        count: 0,
+        sourceError: sanError,
+      });
 
     // If every queried source failed (none ok), surface a retryable failure.
     if (ct.sourceStatuses.length > 0 && ct.sourceStatuses.every((s) => !s.ok)) {
@@ -144,14 +162,30 @@ export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains'
     }
 
     const allNames = ct.names.map((n) => n.name);
-    const liveness = await resolveLiveness(allNames);
+    const liveness = await discoveryPool(
+      allNames,
+      (name) => getDnsService().resolveAddressStatus(name, undefined, ctx.signal),
+      ctx.signal,
+    );
 
     let subdomains = ct.names.map((n) => {
-      const addresses = liveness.get(n.name) ?? [];
-      return { name: n.name, sources: n.sources, resolved: addresses.length > 0, addresses };
+      const result = liveness.get(n.name);
+      const addresses = result?.value?.addresses ?? [];
+      return {
+        name: n.name,
+        sources: n.sources,
+        resolved: addresses.length > 0,
+        addresses,
+        addressError: result?.error ?? result?.value?.addressError ?? null,
+      };
     });
 
     const liveCount = subdomains.filter((s) => s.resolved).length;
+    const filteredAddressErrors = input.includeUnresolved
+      ? []
+      : subdomains.flatMap((s) =>
+          !s.resolved && s.addressError ? [{ name: s.name, addressError: s.addressError }] : [],
+        );
     if (!input.includeUnresolved) {
       subdomains = subdomains.filter((s) => s.resolved);
     }
@@ -163,7 +197,7 @@ export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains'
       );
     }
 
-    return { domain, subdomains, sourceStatuses: ct.sourceStatuses };
+    return { domain, subdomains, sourceStatuses: ct.sourceStatuses, filteredAddressErrors };
   },
 
   format: (result) => {
@@ -171,14 +205,24 @@ export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains'
     lines.push(`## Subdomains for ${result.domain}`);
     lines.push('**Sources:**');
     for (const s of result.sourceStatuses) {
-      lines.push(`- ${s.source}: ok=${s.ok}, count=${s.count}, error=${s.sourceError ?? 'none'}`);
+      lines.push(
+        `- ${s.source}: ok=${s.ok}, count=${s.count}, error=${literalText(s.sourceError ?? 'none')}`,
+      );
+      if (s.complete !== undefined)
+        lines.push(
+          `  - complete=${s.complete}, pagesFetched=${s.pagesFetched}, incompleteReason=${s.incompleteReason ?? 'none'}`,
+        );
     }
     lines.push(`\n**${result.subdomains.length} name(s):**`);
     for (const s of result.subdomains) {
       lines.push(
-        `- **${s.name}** _(${s.sources.join(', ')})_ — resolved=${s.resolved} → ${s.addresses.join(', ') || 'none'}`,
+        `- **${s.name}** _(${s.sources.join(', ')})_ — resolved=${s.resolved} → ${s.addresses.join(', ') || 'none'}; addressError=${literalText(s.addressError ?? 'none')}`,
       );
     }
+    lines.push('**Filtered address failures:**');
+    for (const failure of result.filteredAddressErrors)
+      lines.push(`- ${literalText(failure.name)}: ${literalText(failure.addressError)}`);
+    if (result.filteredAddressErrors.length === 0) lines.push('none');
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });

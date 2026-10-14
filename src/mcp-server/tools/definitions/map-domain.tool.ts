@@ -2,8 +2,8 @@
  * @fileoverview attacksurface_map_domain — the flagship workflow. Maps a domain's external surface
  * end to end: CT-log subdomain discovery → DNS resolution of each candidate → (standard+) DNS
  * records, TLS posture, and HTTP headers/tech for live hosts → (when requested) RDAP/WHOIS
- * registration → (thorough + Shodan key) per-IP Shodan enrichment. All fan-out uses
- * Promise.allSettled so one failed source/host degrades to a note, never tanks the call. The
+ * registration → (thorough + Shodan key) per-IP Shodan enrichment. Bounded fan-out retains
+ * per-host failures so one failed source/host degrades to a note, never tanks the call. The
  * assessment block synthesizes only observable facts — never an exploitation path.
  *
  * Authorized, defensive use only: map only assets you own or are explicitly authorized to assess.
@@ -13,9 +13,10 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getServerConfig } from '@/config/server-config.js';
+import { getServerConfig, parseResolverList } from '@/config/server-config.js';
 import { getCtService } from '@/services/ct/ct-service.js';
 import { getDnsService } from '@/services/dns/dns-service.js';
+import { ALL_RECORD_TYPES } from '@/services/dns/types.js';
 import { getHttpService } from '@/services/http/http-service.js';
 import type { HttpProbeResult } from '@/services/http/types.js';
 import { getRegistrationService } from '@/services/registration/registration-service.js';
@@ -24,14 +25,33 @@ import { getShodanService } from '@/services/shodan/shodan-service.js';
 import type { ShodanHostResult } from '@/services/shodan/types.js';
 import { getTlsService } from '@/services/tls/tls-service.js';
 import type { TlsResult } from '@/services/tls/types.js';
+import {
+  CoverageSchema,
+  DnsPostureSchema,
+  discoveryCoverage,
+  discoveryPool,
+  isTlsSourceAbsent,
+  renderDnsPosture,
+} from '@/utils/discovery.js';
+import { literalText } from '@/utils/literal-text.js';
 import { isValidDomain, normalizeDomain } from '@/utils/validation.js';
-
-const CONCURRENCY = 10;
 
 const LiveHostSchema = z
   .object({
     host: z.string().describe('Subdomain hostname.'),
     addresses: z.array(z.string()).describe('Resolved IP addresses.'),
+    dns: DnsPostureSchema.nullable().describe(
+      'DNS posture at standard+ depth, or null when skipped.',
+    ),
+    errors: z
+      .object({
+        addresses: z.string().nullable().describe('Address-family failure, or null.'),
+        dns: z.string().nullable().describe('DNS posture failure, or null.'),
+        tls: z.string().nullable().describe('TLS failure, or null.'),
+        http: z.string().nullable().describe('HTTP failure, or null.'),
+        shodan: z.string().nullable().describe('Shodan failure/no-data, or null.'),
+      })
+      .describe('Per-leg failures; null summaries at quick depth mean skipped work.'),
     tls: z
       .object({
         protocol: z.string().nullable().describe('Negotiated TLS protocol.'),
@@ -143,6 +163,21 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
     notes: z
       .array(z.string())
       .describe('Operational notes (skipped sources, degraded steps, Shodan absence).'),
+    addressStatuses: z
+      .array(
+        z
+          .object({
+            host: z.string().describe('Examined candidate.'),
+            addresses: z.array(z.string()).describe('Successful address answers.'),
+            addressError: z
+              .string()
+              .nullable()
+              .describe('Failure, or null for successful/absent answers.'),
+          })
+          .describe('Candidate liveness outcome.'),
+      )
+      .describe('Includes unresolved and blocked candidates.'),
+    coverage: CoverageSchema,
   }),
   enrichment: {
     truncated: z.boolean().optional().describe('True when subdomain resolution was capped.'),
@@ -156,6 +191,14 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'The supplied domain is not a syntactically valid registrable domain.',
       recovery: 'Provide a bare apex domain such as "example.com" (no scheme, path, or wildcard).',
+    },
+    {
+      reason: 'discovery_failed',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'No surface could be established and discovery had operational failures.',
+      recovery:
+        'Inspect source and address failures, then retry with a permitted domain and available sources.',
+      retryable: true,
     },
     {
       reason: 'no_surface',
@@ -179,24 +222,32 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
 
     const config = getServerConfig();
     const notes: string[] = [];
+    let discoveryFailed = false;
     const dns = getDnsService();
 
     // Step 1 — CT enumeration (always). TLS-SAN source needs the apex's SANs.
     const apexSans = await getTlsService()
-      .getSans(domain)
-      .catch(() => {
+      .getSans(domain, undefined, undefined, ctx.signal)
+      .catch((err) => {
         ctx.signal?.throwIfAborted();
+        discoveryFailed = !isTlsSourceAbsent(err);
+        notes.push(`TLS-SAN discovery failed: ${err instanceof Error ? err.message : String(err)}`);
         return [] as string[];
       });
     const ct = await getCtService()
       .enumerate(domain, ['crt.sh', 'certspotter', 'tls-san'], ctx, apexSans)
       .catch((err) => {
         ctx.signal?.throwIfAborted();
+        discoveryFailed = true;
         notes.push(`CT enumeration failed: ${err instanceof Error ? err.message : String(err)}`);
         return { domain, names: [], sourceStatuses: [] };
       });
     for (const s of ct.sourceStatuses) {
       if (!s.ok) notes.push(`CT source ${s.source} failed: ${s.sourceError}`);
+      else if (s.complete === false)
+        notes.push(
+          `CT source ${s.source} incomplete: ${s.incompleteReason}; pages=${s.pagesFetched}; error=${s.sourceError ?? 'none'}`,
+        );
     }
 
     // Always include the apex itself as a candidate.
@@ -204,7 +255,7 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
 
     // Step 2 — DNS resolution (always), capped.
     const cap = config.maxSubdomains;
-    const allCandidates = [...candidateSet].sort();
+    const allCandidates = [domain, ...[...candidateSet].filter((h) => h !== domain).sort()];
     const capped = allCandidates.slice(0, cap);
     const wasTruncated = allCandidates.length > cap;
     if (wasTruncated) {
@@ -213,15 +264,30 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
       );
     }
 
-    const liveness = await resolveWithPool(
+    const addressResults = await discoveryPool(
       capped,
-      (host) => dns.resolveAddresses(host),
+      (host) => dns.resolveAddressStatus(host, undefined, ctx.signal),
       ctx.signal,
     );
+    const addressStatuses = capped.map((host) => ({
+      host,
+      addresses: addressResults.get(host)?.value?.addresses ?? [],
+      addressError:
+        addressResults.get(host)?.error ?? addressResults.get(host)?.value?.addressError ?? null,
+    }));
+    const liveness = new Map(addressStatuses.map((r) => [r.host, r.addresses]));
+    for (const r of addressStatuses)
+      if (r.addressError) notes.push(`${r.host}: address lookup failed: ${r.addressError}`);
     const liveNames = capped.filter((h) => (liveness.get(h)?.length ?? 0) > 0);
     const unresolved = capped.filter((h) => (liveness.get(h)?.length ?? 0) === 0);
 
     if (allCandidates.length === 1 && liveNames.length === 0) {
+      if (
+        ct.sourceStatuses.some((s) => !s.ok || s.complete === false) ||
+        addressStatuses.some((r) => r.addressError) ||
+        discoveryFailed
+      )
+        throw ctx.fail('discovery_failed', `Discovery failed for "${domain}": ${notes.join('; ')}`);
       // Only the apex was a candidate and it didn't resolve — no surface at all.
       throw ctx.fail('no_surface', `No subdomains discovered and "${domain}" did not resolve.`, {
         ...ctx.recoveryFor('no_surface'),
@@ -232,6 +298,14 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
     const liveHosts = liveNames.map((host) => ({
       host,
       addresses: liveness.get(host) ?? [],
+      dns: null as z.infer<typeof LiveHostSchema>['dns'],
+      errors: {
+        addresses: addressStatuses.find((r) => r.host === host)?.addressError ?? null,
+        dns: null as string | null,
+        tls: null as string | null,
+        http: null as string | null,
+        shodan: null as string | null,
+      },
       tls: null as z.infer<typeof LiveHostSchema>['tls'],
       http: null as z.infer<typeof LiveHostSchema>['http'],
       shodan: null as z.infer<typeof LiveHostSchema>['shodan'],
@@ -241,8 +315,31 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
     let registration: z.infer<typeof RegistrationSummarySchema> | null = null;
 
     if (input.depth !== 'quick') {
-      // Steps 3–5 — DNS records (apex), TLS + HTTP per live host (parallel, allSettled).
-      await Promise.allSettled([enrichTls(liveHosts), enrichHttp(liveHosts, ctx)]);
+      // Steps 3–5 — DNS records, TLS + HTTP per live host (parallel, bounded).
+      const [dnsResults] = await Promise.all([
+        discoveryPool(
+          liveNames,
+          async (host) =>
+            (
+              await dns.resolveHosts(
+                [host],
+                ALL_RECORD_TYPES,
+                parseResolverList(config.defaultResolvers),
+                false,
+                undefined,
+                ctx.signal,
+              )
+            )[0],
+          ctx.signal,
+        ),
+        enrichTls(liveHosts, ctx),
+        enrichHttp(liveHosts, ctx),
+      ]);
+      for (const h of liveHosts) {
+        const result = dnsResults.get(h.host);
+        h.dns = result?.value ?? null;
+        h.errors.dns = result?.error ?? result?.value?.hostError ?? null;
+      }
       ctx.signal?.throwIfAborted();
       collectAssessment(liveHosts, assessment);
 
@@ -275,6 +372,9 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
     if (wasTruncated) {
       ctx.enrich.truncated({ shown: capped.length, cap });
     }
+    for (const h of liveHosts)
+      for (const [leg, error] of Object.entries(h.errors))
+        if (error) notes.push(`${h.host}: ${leg} failed: ${error}`);
     if (liveNames.length === 0) {
       ctx.enrich.notice(
         `Discovered ${ct.names.length} subdomain(s) for "${domain}" but none resolved to an address.`,
@@ -291,6 +391,8 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
       registration,
       assessment,
       notes,
+      addressStatuses,
+      coverage: discoveryCoverage(allCandidates, capped, input.depth === 'quick' ? [] : liveNames),
     };
   },
 
@@ -320,6 +422,8 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
     for (const h of result.liveHosts) {
       lines.push(`### ${h.host}`);
       lines.push(`**Addresses:** ${h.addresses.join(', ')}`);
+      lines.push(`**DNS:** ${h.dns ? renderDnsPosture(h.dns) : 'skipped'}`);
+      lines.push(`**Leg errors:** ${literalText(JSON.stringify(h.errors))}`);
       if (h.tls) {
         lines.push(
           `**TLS:** ${h.tls.protocol ?? 'unknown'} / ${h.tls.cipher ?? 'unknown'} · issuer ${h.tls.issuer ?? 'unknown'} · ${h.tls.daysUntilExpiry ?? 'unknown'} days left · validationAuthorized=${h.tls.validationAuthorized} · identityAuthorized=${h.tls.identityAuthorized ?? 'unknown'} · identityError=${h.tls.identityError ?? 'none'}`,
@@ -354,39 +458,14 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
 
     if (result.notes.length > 0) {
       lines.push('## Notes');
-      for (const n of result.notes) lines.push(`- ${n}`);
+      for (const n of result.notes) lines.push(`- ${literalText(n)}`);
     }
+    lines.push(`## Address statuses\n${literalText(JSON.stringify(result.addressStatuses))}`);
+    lines.push(`## Coverage\n${literalText(JSON.stringify(result.coverage))}`);
 
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
-
-/** Bounded-concurrency map over hosts. */
-async function resolveWithPool<T>(
-  hosts: string[],
-  fn: (host: string) => Promise<T>,
-  signal?: AbortSignal,
-): Promise<Map<string, T>> {
-  const out = new Map<string, T>();
-  let index = 0;
-  const workers = Array.from({ length: Math.min(CONCURRENCY, hosts.length) }, async () => {
-    while (index < hosts.length) {
-      signal?.throwIfAborted();
-      const i = index++;
-      const host = hosts[i];
-      if (!host) continue;
-      try {
-        out.set(host, await fn(host));
-      } catch {
-        signal?.throwIfAborted();
-        // Per-host failure is recorded as an empty/absent result by the caller.
-      }
-    }
-  });
-  await Promise.all(workers);
-  signal?.throwIfAborted();
-  return out;
-}
 
 type LiveHost = {
   host: string;
@@ -394,14 +473,23 @@ type LiveHost = {
   tls: z.infer<typeof LiveHostSchema>['tls'];
   http: z.infer<typeof LiveHostSchema>['http'];
   shodan: z.infer<typeof LiveHostSchema>['shodan'];
+  dns: z.infer<typeof LiveHostSchema>['dns'];
+  errors: z.infer<typeof LiveHostSchema>['errors'];
 };
 
 /** Inspect TLS for each live host and fold a summary into the record. */
-async function enrichTls(hosts: LiveHost[]): Promise<void> {
-  const results = await getTlsService().inspectHosts(hosts.map((h) => h.host));
+async function enrichTls(hosts: LiveHost[], ctx: Context): Promise<void> {
+  const attempts = await discoveryPool(
+    hosts.map((h) => h.host),
+    async (host) =>
+      (await getTlsService().inspectHosts([host], undefined, undefined, ctx.signal))[0],
+    ctx.signal,
+  );
+  const results = [...attempts.values()].flatMap((r) => (r.value ? [r.value] : []));
   const byHost = new Map<string, TlsResult>(results.map((r) => [r.host, r]));
   for (const h of hosts) {
     const r = byHost.get(h.host);
+    h.errors.tls = attempts.get(h.host)?.error ?? r?.handshakeError ?? null;
     if (!r || r.handshakeError) continue;
     h.tls = {
       protocol: r.protocol,
@@ -419,13 +507,15 @@ async function enrichTls(hosts: LiveHost[]): Promise<void> {
 /** Probe HTTPS for each live host and fold a summary into the record. */
 async function enrichHttp(hosts: LiveHost[], ctx: Context): Promise<void> {
   const http = getHttpService();
-  const results = await resolveWithPool(
+  const results = await discoveryPool(
     hosts.map((h) => h.host),
     (host) => http.probe(`https://${host}`, undefined, 10000, ctx),
     ctx.signal,
   );
   for (const h of hosts) {
-    const r: HttpProbeResult | undefined = results.get(h.host);
+    const attempt = results.get(h.host);
+    const r: HttpProbeResult | null | undefined = attempt?.value;
+    h.errors.http = attempt?.error ?? r?.transportError ?? null;
     if (!r || r.transportError) continue;
     h.http = {
       finalStatus: r.finalStatus,
@@ -445,9 +535,14 @@ async function enrichHttp(hosts: LiveHost[], ctx: Context): Promise<void> {
 async function enrichShodan(hosts: LiveHost[], ctx: Context, notes: string[]): Promise<void> {
   const shodan = getShodanService();
   const distinctIps = [...new Set(hosts.flatMap((h) => h.addresses))];
-  const byIp = await resolveWithPool(distinctIps, (ip) => shodan.lookupHost(ip, ctx), ctx.signal);
+  const attempts = await discoveryPool(distinctIps, (ip) => shodan.lookupHost(ip, ctx), ctx.signal);
+  const byIp = new Map([...attempts].map(([ip, r]) => [ip, r.value]));
   let enriched = 0;
   for (const h of hosts) {
+    h.errors.shodan =
+      h.addresses
+        .flatMap((ip) => (attempts.get(ip)?.error ? [`${ip}: ${attempts.get(ip)?.error}`] : []))
+        .join('; ') || null;
     const hit = h.addresses
       .map((ip) => byIp.get(ip))
       .find((r): r is ShodanHostResult => Boolean(r));
@@ -456,7 +551,11 @@ async function enrichShodan(hosts: LiveHost[], ctx: Context, notes: string[]): P
       enriched++;
     }
   }
-  if (enriched === 0 && distinctIps.length > 0) {
+  if (
+    enriched === 0 &&
+    distinctIps.length > 0 &&
+    [...attempts.values()].every((r) => r.error?.includes('no information'))
+  ) {
     notes.push('Shodan returned no data for any resolved IP (hosts may be unscanned).');
   }
 }

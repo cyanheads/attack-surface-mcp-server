@@ -14,12 +14,31 @@ const tlsBoundary = vi.hoisted(() => ({ connect: vi.fn(), san: 'DNS:example.com'
 vi.mock('node:dns/promises', () => ({
   lookup: vi.fn(),
   Resolver: class FakeResolver {
+    private server = '';
+    setServers(servers: string[]) {
+      this.server = servers[0] ?? '';
+    }
+    resolveCname(host: string) {
+      return dnsBoundary.resolve('CNAME', host);
+    }
+    resolveMx(host: string) {
+      return dnsBoundary.resolve('MX', host);
+    }
+    resolveNs(host: string) {
+      return dnsBoundary.resolve('NS', host);
+    }
+    resolveTxt(host: string) {
+      return dnsBoundary.resolve('TXT', host);
+    }
+    resolveCaa(host: string) {
+      return dnsBoundary.resolve('CAA', host);
+    }
     resolve4(host: string) {
-      return dnsBoundary.resolve('A', host);
+      return dnsBoundary.resolve('A', host, this.server);
     }
 
     resolve6(host: string) {
-      return dnsBoundary.resolve('AAAA', host);
+      return dnsBoundary.resolve('AAAA', host, this.server);
     }
   },
 }));
@@ -34,7 +53,9 @@ import { mapDomainTool } from '@/mcp-server/tools/definitions/map-domain.tool.js
 import { initCtService } from '@/services/ct/ct-service.js';
 import { initDnsService } from '@/services/dns/dns-service.js';
 import { initHttpService } from '@/services/http/http-service.js';
+import { initShodanService } from '@/services/shodan/shodan-service.js';
 import { initTlsService } from '@/services/tls/tls-service.js';
+import { discoveryCoverage } from '@/utils/discovery.js';
 
 type HandlerCtx = Parameters<typeof mapDomainTool.handler>[1];
 
@@ -86,6 +107,31 @@ function context(): HandlerCtx {
 describe('attacksurface_map_domain', () => {
   const fetchMock = vi.fn<typeof fetch>();
 
+  it.each([600, 5000])(
+    'keeps retrieval examples bounded for %i candidates with complete omission lists',
+    (count) => {
+      const names = Array.from({ length: count }, (_, i) => `host${i}.example.com`);
+      const coverage = discoveryCoverage(names, names.slice(0, 200), []);
+      expect(coverage.unexamined).toEqual(names.slice(200));
+      expect(coverage.retrieval).toHaveLength(3);
+      expect(coverage.retrieval[0]).toEqual({
+        toolName: 'attacksurface_resolve_dns',
+        args: { hosts: names.slice(200, 250) },
+        reason: expect.stringContaining('successive batch'),
+      });
+      expect(coverage.retrieval[1]).toMatchObject({
+        toolName: 'attacksurface_inspect_tls',
+        args: { hosts: names.slice(200, 250) },
+      });
+      expect(coverage.retrieval[2]).toMatchObject({
+        toolName: 'attacksurface_probe_http',
+        args: { url: `https://${names[200]}` },
+        reason: expect.stringContaining('once per name'),
+      });
+      expect(discoveryCoverage(names, names, []).retrieval).toEqual([]);
+    },
+  );
+
   beforeEach(() => {
     vi.stubEnv('ATTACKSURFACE_ALLOW_PRIVATE_TARGETS', 'true');
     resetServerConfig();
@@ -108,15 +154,266 @@ describe('attacksurface_map_domain', () => {
     vi.unstubAllEnvs();
   });
 
+  it('keeps the apex at cap one with executable omission retrieval', async () => {
+    vi.stubEnv('ATTACKSURFACE_MAX_SUBDOMAINS', '1');
+    resetServerConfig();
+    initCtService(getServerConfig());
+    fetchMock.mockImplementation(async (input) =>
+      new URL(String(input)).origin === 'https://crt.sh'
+        ? Response.json([{ name_value: 'a.example.com\nb.example.com' }])
+        : Response.json([]),
+    );
+    dnsBoundary.resolve.mockImplementation(async (type) => (type === 'A' ? ['93.184.216.34'] : []));
+    const result = await runToolContract(mapDomainTool, { domain: 'example.com', depth: 'quick' });
+    expect(result.structuredContent).toMatchObject({
+      liveHosts: [{ host: 'example.com' }],
+      coverage: { discovered: 3, examined: 1, unexamined: ['a.example.com', 'b.example.com'] },
+    });
+    expect(JSON.stringify(result.content)).toContain('attacksurface_resolve_dns');
+  });
+
+  it('returns standard DNS posture and attempted leg failures on both surfaces', async () => {
+    fetchMock.mockImplementation(async (input) =>
+      ['https://crt.sh', 'https://api.certspotter.com'].includes(new URL(String(input)).origin)
+        ? Response.json([])
+        : Promise.reject(new Error('HTTP reset')),
+    );
+    dnsBoundary.resolve.mockImplementation(async (type) => (type === 'A' ? ['93.184.216.34'] : []));
+    const result = await runToolContract(mapDomainTool, {
+      domain: 'example.com',
+      includeRegistration: false,
+    });
+    expect(result.structuredContent).toMatchObject({
+      liveHosts: [
+        {
+          dns: { records: { A: ['93.184.216.34'] } },
+          errors: { tls: 'no apex TLS', http: expect.any(String) },
+        },
+      ],
+    });
+    expect(JSON.stringify(result.content)).toContain('resolverResults');
+    expect(JSON.stringify(result.content)).toContain('HTTP reset');
+  });
+
+  it('separates snapshot candidate and fifty-host detail omissions with bounded retrieval', async () => {
+    vi.stubEnv('ATTACKSURFACE_MAX_SUBDOMAINS', '52');
+    resetServerConfig();
+    initCtService(getServerConfig());
+    fetchMock.mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (url.origin === 'https://crt.sh')
+        return Response.json([
+          {
+            name_value: Array.from(
+              { length: 55 },
+              (_, i) => `h${String(i).padStart(2, '0')}.example.com`,
+            ).join('\n'),
+          },
+        ]);
+      if (url.origin === 'https://api.certspotter.com') return Response.json([]);
+      return new Response('');
+    });
+    dnsBoundary.resolve.mockImplementation(async (type) => (type === 'A' ? ['93.184.216.34'] : []));
+    const result = await surfaceResource.handler({ domain: 'example.com' }, createMockContext());
+    expect(result.coverage).toMatchObject({
+      discovered: 56,
+      examined: 52,
+      detailed: 50,
+      unexamined: ['h51.example.com', 'h52.example.com', 'h53.example.com', 'h54.example.com'],
+      detailOmitted: ['h49.example.com', 'h50.example.com'],
+    });
+    expect(result.hosts[0]?.host).toBe('example.com');
+    for (const call of result.coverage.retrieval) {
+      if (call.toolName === 'attacksurface_probe_http')
+        expect(Object.keys(call.args)).toEqual(['url']);
+      else expect((call.args.hosts as string[]).length).toBeLessThanOrEqual(50);
+    }
+    expect(result.notes.some((n) => n.includes('Candidate resolution capped'))).toBe(true);
+    expect(result.notes.some((n) => n.includes('Host detail capped'))).toBe(true);
+  });
+
+  it('distinguishes operational address failures from an absent surface', async () => {
+    fetchMock.mockImplementation(async () => Response.json([]));
+    dnsBoundary.resolve.mockRejectedValue(
+      Object.assign(new Error('resolver SERVFAIL'), { code: 'ESERVFAIL' }),
+    );
+    const result = await runToolContract(mapDomainTool, { domain: 'example.com', depth: 'quick' });
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: { reason: 'discovery_failed', recovery: { hint: expect.stringContaining('retry') } },
+      },
+    });
+    expect(JSON.stringify(result.content)).toContain('SERVFAIL');
+    await expect(
+      surfaceResource.handler({ domain: 'example.com' }, createMockContext()),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
+  });
+
+  it('treats expected apex TLS DNS absence as no surface when CT and DNS establish absence', async () => {
+    tlsBoundary.connect.mockImplementation(() => {
+      const socket = new EventEmitter();
+      Object.assign(socket, { destroy() {} });
+      queueMicrotask(() =>
+        socket.emit(
+          'error',
+          Object.assign(new Error('getaddrinfo ENOTFOUND absent.example.com'), {
+            code: 'ENOTFOUND',
+          }),
+        ),
+      );
+      return socket;
+    });
+    fetchMock.mockImplementation(async () => Response.json([]));
+    dnsBoundary.resolve.mockRejectedValue(
+      Object.assign(new Error('absent'), { code: 'ENOTFOUND' }),
+    );
+    const result = await runToolContract(mapDomainTool, {
+      domain: 'absent.example.com',
+      depth: 'quick',
+    });
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.NotFound, data: { reason: 'no_surface' } },
+    });
+    await expect(
+      surfaceResource.handler({ domain: 'absent.example.com' }, createMockContext()),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound });
+  });
+
+  it.each([401, 404, 429])(
+    'keeps Shodan HTTP %i distinct in map errors and notes',
+    async (status) => {
+      vi.useFakeTimers();
+      vi.stubEnv('SHODAN_API_KEY', 'test-key');
+      resetServerConfig();
+      initShodanService(getServerConfig());
+      dnsBoundary.resolve.mockImplementation(async (type) =>
+        type === 'A' ? ['93.184.216.34'] : [],
+      );
+      fetchMock.mockImplementation(async (input) => {
+        const origin = new URL(String(input)).origin;
+        if (origin === 'https://api.shodan.io') return new Response('', { status });
+        if (origin === 'https://crt.sh' || origin === 'https://api.certspotter.com')
+          return Response.json([]);
+        return new Response('');
+      });
+      const pending = runToolContract(mapDomainTool, {
+        domain: 'example.com',
+        depth: 'thorough',
+        includeRegistration: false,
+      });
+      await vi.runAllTimersAsync();
+      const result = await pending;
+      const text = JSON.stringify(result.content);
+      const expected =
+        status === 401 ? 'rejected the API key' : status === 404 ? 'no information' : 'rate limit';
+      expect(result.structuredContent).toMatchObject({
+        liveHosts: [{ shodan: null, errors: { shodan: expect.stringContaining(expected) } }],
+      });
+      expect(text).toContain(expected);
+      expect(text.includes('hosts may be unscanned')).toBe(status === 404);
+    },
+  );
+
+  it('prices quick and standard DNS work and carries sparse records as literal evidence', async () => {
+    fetchMock.mockImplementation(async (input) =>
+      ['https://crt.sh', 'https://api.certspotter.com'].includes(new URL(String(input)).origin)
+        ? Response.json([])
+        : new Response(''),
+    );
+    const marker = '<section>*TXT* `x`</section>';
+    dnsBoundary.resolve.mockImplementation(async (type, _host, resolver) => {
+      if (type === 'A') return [resolver === '1.1.1.1' ? '93.184.216.35' : '93.184.216.34'];
+      if (type === 'MX') return [{ priority: 10, exchange: 'mail.example.com' }];
+      if (type === 'TXT') return [[marker]];
+      if (type === 'CAA') return [{ critical: 0, issue: 'letsencrypt.org' }];
+      if (type === 'NS') return ['ns.example.com'];
+      if (type === 'AAAA' && resolver === '8.8.8.8')
+        throw Object.assign(new Error('IPv6 SERVFAIL'), { code: 'ESERVFAIL' });
+      return [];
+    });
+    await runToolContract(mapDomainTool, {
+      domain: 'example.com',
+      depth: 'quick',
+      includeRegistration: false,
+    });
+    expect(dnsBoundary.resolve).toHaveBeenCalledTimes(2);
+    dnsBoundary.resolve.mockClear();
+    const standard = await runToolContract(mapDomainTool, {
+      domain: 'example.com',
+      includeRegistration: false,
+    });
+    expect(dnsBoundary.resolve).toHaveBeenCalledTimes(23);
+    expect(standard.structuredContent).toMatchObject({
+      liveHosts: [
+        {
+          dns: {
+            records: {
+              A: ['93.184.216.34'],
+              TXT: [marker],
+              MX: ['10 mail.example.com'],
+              NS: ['ns.example.com'],
+              CAA: ['0 issue "letsencrypt.org"'],
+            },
+            propagationMismatches: ['A'],
+            hostError: 'IPv6 SERVFAIL',
+            resolverResults: [
+              { resolver: '8.8.8.8', queryError: 'IPv6 SERVFAIL' },
+              { resolver: '1.1.1.1', queryError: null },
+              { resolver: '9.9.9.9', queryError: null },
+            ],
+          },
+        },
+      ],
+    });
+    expect(JSON.stringify(standard.content)).toContain(marker);
+    expect(
+      standard.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n'),
+    ).toContain(`\`\`${marker}\`\``);
+  });
+
+  it('bounds standard DNS fanout beyond the first ten hosts', async () => {
+    let active = 0;
+    let peak = 0;
+    dnsBoundary.resolve.mockImplementation(async (type) => {
+      peak = Math.max(peak, ++active);
+      await Promise.resolve();
+      active--;
+      return type === 'A' ? ['93.184.216.34'] : [];
+    });
+    fetchMock.mockImplementation(async (input) => {
+      const origin = new URL(String(input)).origin;
+      if (origin === 'https://crt.sh')
+        return Response.json([
+          { name_value: Array.from({ length: 11 }, (_, i) => `h${i}.example.com`).join('\n') },
+        ]);
+      if (origin === 'https://api.certspotter.com') return Response.json([]);
+      return new Response('');
+    });
+    const result = await runToolContract(mapDomainTool, {
+      domain: 'example.com',
+      includeRegistration: false,
+    });
+    expect(result.structuredContent).toMatchObject({
+      liveHostCount: 12,
+      coverage: { detailed: 12 },
+    });
+    expect(dnsBoundary.resolve).toHaveBeenCalledTimes(276);
+    expect(peak).toBe(210);
+    expect(active).toBe(0);
+  });
+
   it('maps CT names and DNS liveness at quick depth with exact output and format shape', async () => {
     fetchMock.mockImplementation(async (input) => {
       if (String(input).startsWith('https://crt.sh/')) {
-        return new Response(
-          JSON.stringify([{ dns_names: ['api.example.com', 'dead.example.com'] }]),
-          { status: 200 },
-        );
+        return new Response(JSON.stringify([{ name_value: 'api.example.com\ndead.example.com' }]), {
+          status: 200,
+        });
       }
-      return Response.json([{ dns_names: ['api.example.com'] }]);
+      if (String(input).includes('after=')) return Response.json([]);
+      return Response.json([{ id: '1', dns_names: ['api.example.com'] }]);
     });
     dnsBoundary.resolve.mockImplementation(async (type, host) => {
       if (type !== 'A') return [];
@@ -136,22 +433,22 @@ describe('attacksurface_map_domain', () => {
     );
 
     expect(result).toEqual(expect.schemaMatching(mapDomainTool.output));
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       domain: 'example.com',
       depth: 'quick',
       subdomainCount: 2,
       liveHostCount: 2,
       liveHosts: [
         {
-          host: 'api.example.com',
-          addresses: ['93.184.216.34'],
+          host: 'example.com',
+          addresses: ['93.184.216.35'],
           tls: null,
           http: null,
           shodan: null,
         },
         {
-          host: 'example.com',
-          addresses: ['93.184.216.35'],
+          host: 'api.example.com',
+          addresses: ['93.184.216.34'],
           tls: null,
           http: null,
           shodan: null,
@@ -160,7 +457,7 @@ describe('attacksurface_map_domain', () => {
       unresolvedSubdomains: ['dead.example.com'],
       registration: null,
       assessment: [],
-      notes: [],
+      notes: ['TLS-SAN discovery failed: no apex TLS'],
     });
     expect(getEnrichment(ctx)).toEqual({});
     const blocks = mapDomainTool.format?.(result);
@@ -241,6 +538,10 @@ describe('attacksurface_map_domain', () => {
   );
 
   it('returns the typed no_surface envelope when CT is empty and the apex does not resolve', async () => {
+    tlsBoundary.san = '';
+    tlsBoundary.connect.mockImplementation(
+      (_options, callback) => new CertificateSocket('Jan 01 00:00:00 2030 GMT', callback),
+    );
     fetchMock.mockImplementation(async (input) =>
       String(input).startsWith('https://crt.sh/')
         ? new Response('[]', { status: 200 })

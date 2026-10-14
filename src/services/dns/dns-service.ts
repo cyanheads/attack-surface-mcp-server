@@ -65,7 +65,9 @@ async function queryResolver(
   host: string,
   types: DnsRecordType[],
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<ResolverResult> {
+  signal?.throwIfAborted();
   const resolver = new Resolver({ timeout: timeoutMs, tries: 2 });
   resolver.setServers([resolverIp]);
 
@@ -73,20 +75,27 @@ async function queryResolver(
   const records: Partial<Record<DnsRecordType, string[]>> = {};
   let firstError: string | null = null;
 
-  await Promise.allSettled(
-    types.map(async (type) => {
-      try {
-        const vals = await resolveOne(resolver, host, type);
-        if (vals.length > 0) records[type] = vals;
-      } catch (err) {
-        const code = (err as NodeJS.ErrnoException).code;
-        // NODATA/NOTFOUND/NXDOMAIN are normal "no records of this type" — not a resolver failure.
-        if (code !== 'ENODATA' && code !== 'ENOTFOUND') {
-          if (!firstError) firstError = (err as Error).message;
+  const cancel = () => resolver.cancel();
+  signal?.addEventListener('abort', cancel, { once: true });
+  try {
+    await Promise.allSettled(
+      types.map(async (type) => {
+        try {
+          const vals = await resolveOne(resolver, host, type);
+          if (vals.length > 0) records[type] = vals;
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code;
+          // NODATA/NOTFOUND/NXDOMAIN are normal "no records of this type" — not a resolver failure.
+          if (code !== 'ENODATA' && code !== 'ENOTFOUND') {
+            if (!firstError) firstError = (err as Error).message;
+          }
         }
-      }
-    }),
-  );
+      }),
+    );
+  } finally {
+    signal?.removeEventListener('abort', cancel);
+  }
+  signal?.throwIfAborted();
 
   return {
     resolver: resolverIp,
@@ -118,17 +127,20 @@ export class DnsService {
     resolverIps: string[],
     reverse: boolean,
     timeoutMs = DEFAULT_TIMEOUT_MS,
+    signal?: AbortSignal,
   ): Promise<HostDnsResult[]> {
+    signal?.throwIfAborted();
     // SSRF guard: validate resolver IPs directly (caller-controlled, no DNS needed).
     for (const ip of resolverIps) assertSafeResolverIp(ip);
 
     const results = await Promise.allSettled(
       hosts.map(async (host) => {
         // SSRF guard: reject hosts resolving to private/loopback/metadata ranges.
-        await assertSafeDomain(host);
-        return this.resolveOneHost(host, types, resolverIps, reverse, timeoutMs);
+        await assertSafeDomain(host, signal);
+        return this.resolveOneHost(host, types, resolverIps, reverse, timeoutMs, signal);
       }),
     );
+    signal?.throwIfAborted();
 
     return results.map((r, i) =>
       r.status === 'fulfilled'
@@ -150,9 +162,10 @@ export class DnsService {
     resolverIps: string[],
     reverse: boolean,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<HostDnsResult> {
     const resolverResults = await Promise.all(
-      resolverIps.map((ip) => queryResolver(ip, host, types, timeoutMs)),
+      resolverIps.map((ip) => queryResolver(ip, host, types, timeoutMs, signal)),
     );
 
     const primary = resolverResults[0]?.records ?? {};
@@ -203,14 +216,41 @@ export class DnsService {
    * resolver. Returns the resolved IPs (empty when the host does not resolve). SSRF-guarded.
    */
   async resolveAddresses(host: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<string[]> {
-    await assertSafeDomain(host);
+    return (await this.resolveAddressStatus(host, timeoutMs)).addresses;
+  }
+
+  /** Address-family successes and operational failures retained independently. */
+  async resolveAddressStatus(
+    host: string,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    signal?: AbortSignal,
+  ): Promise<{ addresses: string[]; addressError: string | null }> {
+    signal?.throwIfAborted();
+    await assertSafeDomain(host, signal);
+    signal?.throwIfAborted();
     const resolver = new Resolver({ timeout: timeoutMs, tries: 1 });
     const out: string[] = [];
-    await Promise.allSettled([
-      resolver.resolve4(host).then((a) => out.push(...a)),
-      resolver.resolve6(host).then((a) => out.push(...a)),
-    ]);
-    return [...new Set(out)];
+    const cancel = () => resolver.cancel();
+    signal?.addEventListener('abort', cancel, { once: true });
+    let results: PromiseSettledResult<number>[];
+    try {
+      results = await Promise.allSettled([
+        resolver.resolve4(host).then((a) => out.push(...a)),
+        resolver.resolve6(host).then((a) => out.push(...a)),
+      ]);
+    } finally {
+      signal?.removeEventListener('abort', cancel);
+    }
+    signal?.throwIfAborted();
+    const errors = results.flatMap((r, i) => {
+      if (
+        r.status === 'fulfilled' ||
+        ['ENODATA', 'ENOTFOUND'].includes((r.reason as NodeJS.ErrnoException).code ?? '')
+      )
+        return [];
+      return [`${i === 0 ? 'A' : 'AAAA'}: ${(r.reason as Error).message}`];
+    });
+    return { addresses: [...new Set(out)], addressError: errors.length ? errors.join('; ') : null };
   }
 }
 

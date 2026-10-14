@@ -10,12 +10,16 @@ const dnsBoundary = vi.hoisted(() => ({
   query: vi.fn(),
   reverse: vi.fn(),
   setServers: vi.fn(),
+  cancel: vi.fn(),
 }));
 
 vi.mock('node:dns/promises', () => ({
   lookup: dnsBoundary.lookup,
   Resolver: class FakeResolver {
     private server = '';
+    cancel() {
+      dnsBoundary.cancel();
+    }
 
     setServers(servers: string[]) {
       this.server = servers[0] ?? '';
@@ -70,6 +74,7 @@ describe('DnsService', () => {
     dnsBoundary.query.mockReset();
     dnsBoundary.reverse.mockReset();
     dnsBoundary.setServers.mockReset();
+    dnsBoundary.cancel.mockReset();
     dnsBoundary.lookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
     dnsBoundary.query.mockRejectedValue(dnsError('ENODATA'));
     dnsBoundary.reverse.mockRejectedValue(dnsError('ENODATA'));
@@ -285,6 +290,53 @@ describe('DnsService', () => {
       '2606:2800:220:1:248:1893:25c8:1946',
     ]);
   });
+
+  it('retains successful address families alongside liveness failures', async () => {
+    dnsBoundary.query.mockImplementation(async (type) => {
+      if (type === 'A') return ['93.184.216.34'];
+      throw dnsError('ESERVFAIL', 'IPv6 SERVFAIL');
+    });
+    await expect(new DnsService().resolveAddressStatus('example.com')).resolves.toEqual({
+      addresses: ['93.184.216.34'],
+      addressError: 'AAAA: IPv6 SERVFAIL',
+    });
+  });
+
+  it.each(['liveness', 'posture'])(
+    'cancels pending %s DNS queries without converting cancellation to absence',
+    async (mode) => {
+      const controller = new AbortController();
+      const ready = Promise.withResolvers<void>();
+      const rejections: Array<(error: Error) => void> = [];
+      dnsBoundary.query.mockImplementation(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejections.push(reject);
+            if (rejections.length === 2) ready.resolve();
+          }),
+      );
+      dnsBoundary.cancel.mockImplementation(() => {
+        for (const reject of rejections) reject(dnsError('ECANCELLED'));
+      });
+      const service = new DnsService();
+      const pending =
+        mode === 'liveness'
+          ? service.resolveAddressStatus('example.com', undefined, controller.signal)
+          : service.resolveHosts(
+              ['example.com'],
+              ['A', 'AAAA'],
+              ['8.8.8.8'],
+              false,
+              undefined,
+              controller.signal,
+            );
+      const rejection = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+      await ready.promise;
+      controller.abort();
+      await rejection;
+      expect(dnsBoundary.cancel).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('distinguishes no PTR record from a reverse resolver error', async () => {
     dnsBoundary.reverse.mockImplementation(async (ip) => {

@@ -47,7 +47,7 @@ Passive external attack-surface mapping (EASM) over Certificate Transparency log
 
 | Resource | Description |
 |:---|:---|
-| `attacksurface://surface/{domain}` | Read-once snapshot of a domain's mapped external surface (subdomains, live hosts, per-host TLS/HTTP posture summary), equivalent to a standard-depth `attacksurface_map_domain` call. |
+| `attacksurface://surface/{domain}` | Read-once snapshot of a domain's mapped external surface (subdomains, live hosts, per-host DNS/TLS/HTTP posture summary), with separate candidate and 50-host detail coverage. |
 
 All resource data is also reachable via tools — tool-only clients lose nothing, since `attacksurface_map_domain` covers the same ground.
 
@@ -58,13 +58,16 @@ All resource data is also reachable via tools — tool-only clients lose nothing
 - `depth`: `quick` discovers subdomains and liveness; `standard` adds DNS records, TLS, and HTTP posture; `thorough` adds per-IP Shodan data when a key is present, otherwise a note.
 - Returns a structured surface map and defensive `assessment` of observable facts. Failed sources or unreachable hosts become notes; subdomain resolution is capped by `ATTACKSURFACE_MAX_SUBDOMAINS` (default 200), with truncation disclosed.
 - `includeRegistration` adds RDAP/WHOIS data for the apex at standard or thorough depth.
+- The apex takes the first candidate slot, even at cap 1. `coverage` separates discovered/examined candidates from host detail; `unexamined` and `detailOmitted` name exact omissions. `retrieval` supplies at most three executable examples (`toolName`, `args`, `reason`): DNS/TLS batches of at most 50 hosts and one HTTP URL, with instructions to repeat over the remaining names. These caps bound work, not response bytes.
+- Standard and thorough depth return canonical A/AAAA/CNAME/MX/NS/TXT/CAA records from the first configured resolver, all resolver outcomes and propagation mismatches for examined live hosts. Work is bounded to ten hosts concurrently. `addressStatuses` and per-host `errors` retain blocked targets and partial failures alongside successful data; null posture at quick depth means skipped work.
 
 ---
 
 ### `attacksurface_enumerate_subdomains` <sub>tool</sub>
 
-- Discovers names through crt.sh → Certspotter → the apex TLS certificate SANs, then resolves DNS liveness. `includeUnresolved: false` keeps only live hosts.
+- Discovers names through crt.sh → Certspotter → the apex TLS certificate SANs, then resolves DNS liveness. `includeUnresolved: false` keeps only live hosts while `filteredAddressErrors` retains operational failures for excluded names.
 - Returns each name's source provenance and per-source status; no DNS brute-forcing or target-resolver probing.
+- crt.sh names come from newline-delimited `name_value`; Certspotter uses `dns_names`. Certspotter follows issuance cursors for at most five pages within one 15-second budget, including retries and body reads. `complete`, `pagesFetched` and `incompleteReason` disclose exhaustion or partial coverage; names from earlier pages survive a later failure. `addressError` distinguishes operational DNS failures from ENODATA/ENOTFOUND absence.
 
 ---
 
@@ -121,7 +124,7 @@ All resource data is also reachable via tools — tool-only clients lose nothing
 ### `attacksurface://surface/{domain}` <sub>resource</sub>
 
 - Takes a domain and returns an `application/json` snapshot equivalent to a standard-depth `attacksurface_map_domain` call.
-- Includes subdomain and live-host counts plus per-host TLS/HTTP posture. Caps host detail at 50 live hosts, discloses omissions, and points to `attacksurface_map_domain` for the full set.
+- Includes subdomain and live-host counts plus per-host DNS/TLS/HTTP posture and errors. Candidate resolution uses the same apex-first cap as mapping; a separate 50-live-host detail cap limits posture work. `coverage` discloses both omission sets with executable follow-up calls, while notes retain source incompleteness and failed legs.
 
 ## Features
 
@@ -242,7 +245,7 @@ All variables are optional — the server boots and delivers its keyless core wi
 |:---------|:------------|:--------|
 | `SHODAN_API_KEY` | Enables `attacksurface_lookup_host`. Absent → that tool returns `source_unavailable`; every other tool keeps working. | — |
 | `CERTSPOTTER_API_KEY` | Raises Certspotter rate limits for the CT-log subdomain fallback. Absent → free unauthenticated tier (rate-limited but functional). | — |
-| `ATTACKSURFACE_DEFAULT_RESOLVERS` | Comma-separated default DNS resolver IPs for `attacksurface_resolve_dns`. | `8.8.8.8,1.1.1.1,9.9.9.9` |
+| `ATTACKSURFACE_DEFAULT_RESOLVERS` | Comma-separated public DNS resolver IPs for `attacksurface_resolve_dns` and standard+ map/snapshot posture. | `8.8.8.8,1.1.1.1,9.9.9.9` |
 | `ATTACKSURFACE_HTTP_USER_AGENT` | Default User-Agent for `attacksurface_probe_http` (overridable per call). | `attack-surface-mcp-server/passive-recon (+https://github.com/cyanheads/attack-surface-mcp-server)` |
 | `ATTACKSURFACE_MAX_SUBDOMAINS` | Cap on subdomains resolved during a `map_domain` run — bounds fan-out cost. | `200` |
 | `ATTACKSURFACE_RDAP_BOOTSTRAP_URL` | RDAP bootstrap base URL; override for a private/mirrored RDAP. | `https://rdap.org` |

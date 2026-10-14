@@ -233,9 +233,10 @@ export async function assertSafeUrl(rawUrl: string, signal?: AbortSignal): Promi
  * `SSRF_BLOCKED` prefix if it resolves to a non-public address.
  * No-ops when `ATTACKSURFACE_ALLOW_PRIVATE_TARGETS=true`.
  */
-export async function assertSafeDomain(domain: string): Promise<void> {
+export async function assertSafeDomain(domain: string, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   if (privateTargetsAllowed()) return;
-  await resolveAndCheck(domain, `Host "${domain}"`);
+  await resolveAndCheck(domain, `Host "${domain}"`, signal);
 }
 
 /**
@@ -249,9 +250,10 @@ export async function assertSafeDomain(domain: string): Promise<void> {
  * still send the original hostname as TLS SNI / HTTP Host so certificate validation and vhost
  * routing hold.
  */
-export async function resolveSafeHost(host: string): Promise<string | null> {
+export async function resolveSafeHost(host: string, signal?: AbortSignal): Promise<string | null> {
+  signal?.throwIfAborted();
   if (privateTargetsAllowed()) return null;
-  const validated = await resolveAndCheck(host, `Host "${host}"`);
+  const validated = await resolveAndCheck(host, `Host "${host}"`, signal);
   return validated.find((ip) => !ip.includes(':')) ?? validated[0] ?? null;
 }
 

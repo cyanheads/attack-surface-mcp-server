@@ -139,6 +139,11 @@ describe('DnsService fuzz', () => {
             expect(values).toEqual([...values].sort());
           }
           expect(result?.resolved).toBe(scenario.A.length > 0 || scenario.AAAA.length > 0);
+          const liveness = await new DnsService().resolveAddressStatus('records.example.com');
+          expect(liveness).toEqual({
+            addresses: [...new Set([...scenario.A, ...scenario.AAAA])],
+            addressError: null,
+          });
         },
       ),
       { numRuns: 75 },

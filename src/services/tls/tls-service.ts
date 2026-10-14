@@ -129,15 +129,19 @@ function inspectOne(
   connectIp: string | null,
   port: number,
   timeoutMs: number,
+  signal?: AbortSignal,
+  rejectConnectionErrors = false,
 ): Promise<TlsResult> {
+  signal?.throwIfAborted();
   const checkedAt = new Date().toISOString();
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let settled = false;
     const settle = (result: TlsResult) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
       socket.destroy();
       resolve(result);
     };
@@ -225,7 +229,27 @@ function inspectOne(
       });
     }, timeoutMs);
 
+    const abort = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      signal?.removeEventListener('abort', abort);
+      reject(signal?.reason);
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+
     socket.on('error', (err) => {
+      if (rejectConnectionErrors) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+        socket.destroy();
+        reject(err);
+        return;
+      }
       settle({
         host,
         port,
@@ -251,13 +275,16 @@ export class TlsService {
     hosts: string[],
     port = DEFAULT_PORT,
     timeoutMs = DEFAULT_TIMEOUT_MS,
+    signal?: AbortSignal,
   ): Promise<TlsResult[]> {
+    signal?.throwIfAborted();
     const results = await Promise.allSettled(
       hosts.map(async (host) => {
-        const connectIp = await resolveSafeHost(host);
-        return inspectOne(host, connectIp, port, timeoutMs);
+        const connectIp = await resolveSafeHost(host, signal);
+        return inspectOne(host, connectIp, port, timeoutMs, signal);
       }),
     );
+    signal?.throwIfAborted();
     return results.map((r, i) =>
       r.status === 'fulfilled'
         ? r.value
@@ -279,19 +306,16 @@ export class TlsService {
     );
   }
 
-  /** Inspect a single host and return its SAN list (used as a CT fallback source). Empty on failure. */
+  /** Inspect a single host's SAN list; discovery callers retain failures as source status. */
   async getSans(
     host: string,
     port = DEFAULT_PORT,
     timeoutMs = DEFAULT_TIMEOUT_MS,
+    signal?: AbortSignal,
   ): Promise<string[]> {
-    let connectIp: string | null;
-    try {
-      connectIp = await resolveSafeHost(host);
-    } catch {
-      return [];
-    }
-    const result = await inspectOne(host, connectIp, port, timeoutMs);
+    const connectIp = await resolveSafeHost(host, signal);
+    const result = await inspectOne(host, connectIp, port, timeoutMs, signal, true);
+    if (result.handshakeError) throw new Error(result.handshakeError);
     return result.certificate?.subjectAltNames ?? [];
   }
 }
