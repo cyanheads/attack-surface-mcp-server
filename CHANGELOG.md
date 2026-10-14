@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.2](changelog/0.3.x/0.3.2.md) — 2026-10-14
+
+Discovery retains provider results, failures and explicit partial coverage.
+
 ## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-10-13
 
 Accurate registration lookups and complete literal evidence
