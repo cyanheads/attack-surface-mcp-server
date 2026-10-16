@@ -1,6 +1,6 @@
 # attack-surface-mcp-server - Directory Structure
 
-Generated on: 2026-10-14 13:25:59
+Generated on: 2026-10-16 14:26:43
 
 ```text
 attack-surface-mcp-server/
@@ -27,6 +27,7 @@ attack-surface-mcp-server/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
+│   ├── 0.4.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -185,6 +186,8 @@ attack-surface-mcp-server/
 │   ├── utils/
 │   │   ├── discovery.ts
 │   │   ├── literal-text.ts
+│   │   ├── next-call.ts
+│   │   ├── response-budget.ts
 │   │   ├── ssrf-guard.test.ts
 │   │   ├── ssrf-guard.ts
 │   │   ├── validation.test.ts
@@ -198,6 +201,7 @@ attack-surface-mcp-server/
 │   │   ├── registration-service.fuzz.test.ts
 │   │   └── tls-service.fuzz.test.ts
 │   ├── integration/
+│   │   ├── bounded-guidance.test.ts
 │   │   ├── enumerate-subdomains.tool.test.ts
 │   │   ├── inspect-tls.tool.test.ts
 │   │   ├── literal-evidence.test.ts
