@@ -50,9 +50,11 @@ vi.mock('node:tls', async (original) => ({
 import { getServerConfig, resetServerConfig } from '@/config/server-config.js';
 import { surfaceResource } from '@/mcp-server/resources/definitions/surface.resource.js';
 import { mapDomainTool } from '@/mcp-server/tools/definitions/map-domain.tool.js';
+import { reconGuidanceTool } from '@/mcp-server/tools/definitions/recon-guidance.tool.js';
 import { initCtService } from '@/services/ct/ct-service.js';
 import { initDnsService } from '@/services/dns/dns-service.js';
 import { initHttpService } from '@/services/http/http-service.js';
+import { initRegistrationService } from '@/services/registration/registration-service.js';
 import { initShodanService } from '@/services/shodan/shodan-service.js';
 import { initTlsService } from '@/services/tls/tls-service.js';
 import { discoveryCoverage } from '@/utils/discovery.js';
@@ -81,13 +83,13 @@ class CertificateSocket extends EventEmitter {
   }
 
   destroy() {}
-  getProtocol() {
+  getProtocol(): string | null {
     return 'TLSv1.3';
   }
   getCipher() {
     return { standardName: 'TLS_AES_128_GCM_SHA256' };
   }
-  getPeerCertificate() {
+  getPeerCertificate(): Record<string, unknown> {
     return {
       subject: { CN: 'example.com' },
       issuer: { CN: 'Example CA' },
@@ -146,6 +148,7 @@ describe('attacksurface_map_domain', () => {
     initDnsService();
     initTlsService();
     initHttpService('test-agent');
+    initRegistrationService(config);
   });
 
   afterEach(() => {
@@ -153,6 +156,184 @@ describe('attacksurface_map_domain', () => {
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
   });
+
+  it('prefills guidance from raw HTTP audits and known TLS evidence, retaining unknown expiry', async () => {
+    tlsBoundary.connect.mockImplementation(
+      (_options, callback) => new CertificateSocket('Bad time value', callback),
+    );
+    dnsBoundary.resolve.mockImplementation(async (type) => (type === 'A' ? ['93.184.216.34'] : []));
+    fetchMock.mockImplementation(async (input) =>
+      ['https://crt.sh', 'https://api.certspotter.com'].includes(new URL(String(input)).origin)
+        ? Response.json([])
+        : new Response('', { headers: { server: 'nginx/1.2' } }),
+    );
+    const result = await runToolContract(mapDomainTool, {
+      domain: 'EXAMPLE.COM.',
+      includeRegistration: false,
+    });
+    expect(result.structuredContent).toMatchObject({
+      guidanceCoverage: { eligibleCount: 1, includedCount: 1, omittedHosts: [] },
+      nextToolSuggestions: [
+        {
+          toolName: 'attacksurface_recon_guidance',
+          args: {
+            topic: 'triage',
+            findings: {
+              domain: 'example.com',
+              hosts: [
+                {
+                  host: 'example.com',
+                  tlsProtocol: 'TLSv1.3',
+                  certValidationAuthorized: true,
+                  missingSecurityHeaders: expect.arrayContaining([
+                    'Strict-Transport-Security',
+                    'Content-Security-Policy',
+                  ]),
+                },
+              ],
+            },
+          },
+        },
+      ],
+    });
+    const calls = result.structuredContent?.nextToolSuggestions as Array<{ args: unknown }>;
+    const args = reconGuidanceTool.input.parse(calls[0]?.args);
+    expect(args.findings.hosts[0]).not.toHaveProperty('certDaysUntilExpiry');
+    expect(JSON.stringify(result.content)).toContain('attacksurface_recon_guidance');
+    expect(JSON.stringify(result.content)).toContain('omittedHosts');
+  });
+
+  it('returns no guidance call for address-only quick maps', async () => {
+    dnsBoundary.resolve.mockImplementation(async (type) => (type === 'A' ? ['93.184.216.34'] : []));
+    fetchMock.mockImplementation(async () => Response.json([]));
+    const result = await runToolContract(mapDomainTool, { domain: 'example.com', depth: 'quick' });
+    expect(result.structuredContent).toMatchObject({
+      nextToolSuggestions: [],
+      guidanceCoverage: { eligibleCount: 0, includedCount: 0, omittedHosts: [] },
+    });
+    expect(JSON.stringify(result.content)).toContain('eligibleCount');
+  });
+
+  it('does not turn absent certificate evidence into a failed-chain guidance finding', async () => {
+    tlsBoundary.connect.mockImplementation((_options, callback) => {
+      const socket = new CertificateSocket('Bad time value', callback);
+      socket.authorized = false;
+      vi.spyOn(socket, 'getPeerCertificate').mockReturnValue({});
+      vi.spyOn(socket, 'getProtocol').mockReturnValue(null);
+      return socket;
+    });
+    dnsBoundary.resolve.mockImplementation(async (type) => (type === 'A' ? ['93.184.216.34'] : []));
+    fetchMock.mockImplementation(async (input) =>
+      ['https://crt.sh', 'https://api.certspotter.com'].includes(new URL(String(input)).origin)
+        ? Response.json([])
+        : new Response(''),
+    );
+    const result = await runToolContract(mapDomainTool, {
+      domain: 'example.com',
+      includeRegistration: false,
+    });
+    const output = mapDomainTool.output.parse(result.structuredContent);
+    const args = reconGuidanceTool.input.parse(output.nextToolSuggestions[0]?.args);
+    expect(args.findings.hosts[0]).not.toHaveProperty('certValidationAuthorized');
+    expect(args.findings.hosts[0]).not.toHaveProperty('certDaysUntilExpiry');
+    expect(args.findings.hosts[0]).not.toHaveProperty('tlsProtocol');
+  });
+
+  it.each(['known', 'unknown'])(
+    'maps registration expiry only when parseable (%s)',
+    async (kind) => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-10-16T12:00:00Z'));
+      const expiry = kind === 'known' ? '2026-10-16T13:00:00Z' : 'unparseable expiry';
+      tlsBoundary.connect.mockImplementation(
+        (_options, callback) => new CertificateSocket('Jan 01 00:00:00 2027 GMT', callback),
+      );
+      dnsBoundary.resolve.mockImplementation(async (type) =>
+        type === 'A' ? ['93.184.216.34'] : [],
+      );
+      fetchMock.mockImplementation(async (input) => {
+        const url = new URL(String(input));
+        if (['https://crt.sh', 'https://api.certspotter.com'].includes(url.origin))
+          return Response.json([]);
+        if (url.origin === 'https://rdap.org')
+          return Response.json({ events: [{ eventAction: 'expiration', eventDate: expiry }] });
+        return new Response('');
+      });
+      const result = await runToolContract(mapDomainTool, { domain: 'example.com' });
+      const output = mapDomainTool.output.parse(result.structuredContent);
+      const args = reconGuidanceTool.input.parse(output.nextToolSuggestions[0]?.args);
+      if (kind === 'known') expect(args.findings.registrationExpiryDays).toBe(0);
+      else expect(args.findings).not.toHaveProperty('registrationExpiryDays');
+    },
+  );
+
+  it.each([false, true])(
+    'bounds the actual incremental handoff and preserves complete hosts (oversized=%s)',
+    async (oversized) => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-10-16T12:00:00Z'));
+      const names = Array.from({ length: 54 }, (_, i) => `h${i}.example.com`);
+      const version = oversized ? '1'.repeat(18000) : '1.2';
+      tlsBoundary.connect.mockImplementation((_options, callback) => {
+        const socket = new CertificateSocket('Oct 16 13:00:00 2026 GMT', callback);
+        socket.authorized = false;
+        return socket;
+      });
+      dnsBoundary.resolve.mockImplementation(async (type) =>
+        type === 'A' ? ['93.184.216.34'] : [],
+      );
+      fetchMock.mockImplementation(async (input) => {
+        const origin = new URL(String(input)).origin;
+        if (origin === 'https://crt.sh') return Response.json([{ name_value: names.join('\n') }]);
+        if (origin === 'https://api.certspotter.com') return Response.json([]);
+        return new Response('', { headers: { server: `nginx/${version}` } });
+      });
+      const result = await runToolContract(mapDomainTool, {
+        domain: 'example.com',
+        includeRegistration: false,
+      });
+      const output = mapDomainTool.output.parse(result.structuredContent);
+      const call = output.nextToolSuggestions[0];
+      const args = reconGuidanceTool.input.parse(call?.args);
+      expect(output.guidanceCoverage.eligibleCount).toBe(55);
+      expect(output.guidanceCoverage.includedCount).toBeLessThanOrEqual(50);
+      expect(output.guidanceCoverage.includedCount).toBeGreaterThan(0);
+      expect(args.findings.hosts).toHaveLength(output.guidanceCoverage.includedCount);
+      expect(args.findings.hosts[0]).toMatchObject({
+        host: 'example.com',
+        certValidationAuthorized: false,
+        certDaysUntilExpiry: 0,
+      });
+      expect(output.guidanceCoverage.omittedHosts).toEqual(
+        output.liveHosts.slice(output.guidanceCoverage.includedCount).map((h) => h.host),
+      );
+      const text = result.content
+        .filter((b) => b.type === 'text')
+        .map((b) => b.text)
+        .join('\n');
+      expect(text).toContain(
+        `nextToolSuggestions=\`${JSON.stringify(output.nextToolSuggestions)}\``,
+      );
+      expect(text).toContain(`guidanceCoverage=\`${JSON.stringify(output.guidanceCoverage)}\``);
+      const {
+        nextToolSuggestions: _nextToolSuggestions,
+        guidanceCoverage: _guidanceCoverage,
+        guidanceNotice: _guidanceNotice,
+        ...base
+      } = output;
+      const baseText = text.slice(0, text.indexOf('\n## Guidance handoff'));
+      const incremental =
+        Buffer.byteLength(JSON.stringify({ structuredContent: output, content: result.content })) -
+        Buffer.byteLength(
+          JSON.stringify({ structuredContent: base, content: [{ type: 'text', text: baseText }] }),
+        );
+      if (oversized) {
+        expect(output.guidanceCoverage.includedCount).toBe(1);
+        expect(output.guidanceNotice).toContain('oversized');
+        expect(args.findings.hosts[0]?.technologies?.[0]?.version).toBe(version);
+      } else expect(incremental).toBeLessThanOrEqual(24000);
+    },
+  );
 
   it('keeps the apex at cap one with executable omission retrieval', async () => {
     vi.stubEnv('ATTACKSURFACE_MAX_SUBDOMAINS', '1');

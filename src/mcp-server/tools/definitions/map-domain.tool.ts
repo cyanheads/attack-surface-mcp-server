@@ -34,7 +34,10 @@ import {
   renderDnsPosture,
 } from '@/utils/discovery.js';
 import { literalText } from '@/utils/literal-text.js';
+import { NextCallSchema } from '@/utils/next-call.js';
+import { RESPONSE_BYTE_TARGET, responseBytes } from '@/utils/response-budget.js';
 import { isValidDomain, normalizeDomain } from '@/utils/validation.js';
+import type { FindingHostSchema } from './recon-guidance.tool.js';
 
 const LiveHostSchema = z
   .object({
@@ -95,6 +98,9 @@ const LiveHostSchema = z
             'Body completeness; limited means the prefix cap was reached without observing EOF.',
           ),
         securityFindings: z.array(z.string()).describe('Security-header findings.'),
+        missingSecurityHeaders: z
+          .array(z.string())
+          .describe('Missing header names derived from null raw audit fields.'),
         technologies: z
           .array(
             z
@@ -178,6 +184,21 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
       )
       .describe('Includes unresolved and blocked candidates.'),
     coverage: CoverageSchema,
+    nextToolSuggestions: z
+      .array(NextCallSchema)
+      .describe('At most one local prefilled guidance call.'),
+    guidanceCoverage: z
+      .object({
+        eligibleCount: z.number().describe('Hosts with guidance evidence.'),
+        includedCount: z
+          .number()
+          .describe('Eligible prefix included in the guidance call, at most 50.'),
+        omittedHosts: z.array(z.string()).describe('Exact eligible suffix to submit separately.'),
+      })
+      .describe('Guidance handoff coverage, separate from map discovery coverage.'),
+    guidanceNotice: z
+      .string()
+      .describe('How to submit omitted hosts, including byte-target exceptions.'),
   }),
   enrichment: {
     truncated: z.boolean().optional().describe('True when subdomain resolution was capped.'),
@@ -393,6 +414,7 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
       notes,
       addressStatuses,
       coverage: discoveryCoverage(allCandidates, capped, input.depth === 'quick' ? [] : liveNames),
+      ...buildGuidanceHandoff(domain, liveHosts, registration?.expiry),
     };
   },
 
@@ -433,6 +455,9 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
       if (h.http) {
         lines.push(`**HTTP:** ${h.http.finalStatus} → ${h.http.finalUrl}`);
         lines.push(
+          `**Missing security headers:** ${h.http.missingSecurityHeaders.map(literalText).join(', ') || 'none'}`,
+        );
+        lines.push(
           `  - Body inspection: ${h.http.bodyInspection.status} (${h.http.bodyInspection.error ?? 'no error'})`,
         );
         if (h.http.technologies.length > 0) {
@@ -462,6 +487,7 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
     }
     lines.push(`## Address statuses\n${literalText(JSON.stringify(result.addressStatuses))}`);
     lines.push(`## Coverage\n${literalText(JSON.stringify(result.coverage))}`);
+    lines.push(renderGuidanceHandoff(result));
 
     return [{ type: 'text', text: lines.join('\n') }];
   },
@@ -476,6 +502,99 @@ type LiveHost = {
   dns: z.infer<typeof LiveHostSchema>['dns'];
   errors: z.infer<typeof LiveHostSchema>['errors'];
 };
+
+/** Build an evidence-preserving eligible-host prefix without changing map coverage. */
+function buildGuidanceHandoff(
+  domain: string,
+  hosts: Array<Pick<LiveHost, 'host' | 'addresses' | 'tls' | 'http' | 'shodan'>>,
+  expiry?: string,
+) {
+  const eligible: z.infer<typeof FindingHostSchema>[] = hosts.flatMap((h) => {
+    const missingSecurityHeaders = h.http?.missingSecurityHeaders ?? [];
+    const technologies = h.http?.technologies.filter((t) => t.version !== undefined) ?? [];
+    // enrichTls retains the leaf issuer string (even empty); null means no certificate was presented.
+    const certificateKnown = h.tls !== null && h.tls.issuer !== null;
+    const tlsSignal = h.tls !== null && (h.tls.protocol !== null || certificateKnown);
+    if (
+      !tlsSignal &&
+      !missingSecurityHeaders.length &&
+      !technologies.length &&
+      !h.shodan?.ports.length
+    )
+      return [];
+    return [
+      {
+        host: h.host,
+        addresses: h.addresses,
+        ...(h.tls?.protocol != null ? { tlsProtocol: h.tls.protocol } : {}),
+        ...(h.tls?.daysUntilExpiry != null ? { certDaysUntilExpiry: h.tls.daysUntilExpiry } : {}),
+        ...(certificateKnown && h.tls
+          ? { certValidationAuthorized: h.tls.validationAuthorized }
+          : {}),
+        ...(h.http ? { missingSecurityHeaders } : {}),
+        ...(technologies.length
+          ? { technologies: technologies.map((t) => ({ name: t.name, version: t.version })) }
+          : {}),
+        ...(h.shodan ? { openPorts: h.shodan.ports } : {}),
+      },
+    ];
+  });
+  const expiryTime = expiry === undefined ? Number.NaN : Date.parse(expiry);
+  const registrationExpiryDays = Number.isNaN(expiryTime)
+    ? undefined
+    : Math.floor((expiryTime - Date.now()) / 86_400_000);
+  const build = (count: number, oversize = false) => ({
+    nextToolSuggestions:
+      count === 0
+        ? []
+        : [
+            {
+              toolName: 'attacksurface_recon_guidance',
+              reason: 'Triage the mapped TLS, header, version and observed-port evidence.',
+              args: {
+                topic: 'triage',
+                findings: {
+                  domain,
+                  hosts: eligible.slice(0, count),
+                  ...(registrationExpiryDays !== undefined ? { registrationExpiryDays } : {}),
+                },
+              },
+            },
+          ],
+    guidanceCoverage: {
+      eligibleCount: eligible.length,
+      includedCount: count,
+      omittedHosts: eligible.slice(count).map((h) => h.host),
+    },
+    guidanceNotice: `Submit remaining map hosts separately to attacksurface_recon_guidance, preserving their evidence.${oversize ? ' One complete oversized host or required omission metadata exceeds the 24,000-byte incremental target.' : ''}`,
+  });
+  let count = 0;
+  for (let n = 1; n <= Math.min(50, eligible.length); n++) {
+    const candidate = build(n);
+    if (
+      responseBytes(candidate, [{ type: 'text', text: renderGuidanceHandoff(candidate) }]) >
+      RESPONSE_BYTE_TARGET
+    ) {
+      if (count === 0) count = n;
+      break;
+    }
+    count = n;
+  }
+  const result = build(count);
+  return responseBytes(result, [{ type: 'text', text: renderGuidanceHandoff(result) }]) >
+    RESPONSE_BYTE_TARGET
+    ? build(count, true)
+    : result;
+}
+
+/** Same complete handoff text is used for byte fitting and the map formatter. */
+function renderGuidanceHandoff(result: {
+  nextToolSuggestions: z.infer<typeof NextCallSchema>[];
+  guidanceCoverage: { eligibleCount: number; includedCount: number; omittedHosts: string[] };
+  guidanceNotice: string;
+}): string {
+  return `## Guidance handoff\nnextToolSuggestions=${literalText(JSON.stringify(result.nextToolSuggestions))}\nguidanceCoverage=${literalText(JSON.stringify(result.guidanceCoverage))}\n${result.guidanceNotice}`;
+}
 
 /** Inspect TLS for each live host and fold a summary into the record. */
 async function enrichTls(hosts: LiveHost[], ctx: Context): Promise<void> {
@@ -522,6 +641,14 @@ async function enrichHttp(hosts: LiveHost[], ctx: Context): Promise<void> {
       finalUrl: r.finalUrl,
       bodyInspection: r.bodyInspection,
       securityFindings: r.securityAudit.findings,
+      missingSecurityHeaders: [
+        ['Strict-Transport-Security', r.securityAudit.hsts],
+        ['Content-Security-Policy', r.securityAudit.csp],
+        ['X-Frame-Options', r.securityAudit.xFrameOptions],
+        ['X-Content-Type-Options', r.securityAudit.xContentTypeOptions],
+        ['Referrer-Policy', r.securityAudit.referrerPolicy],
+        ['Permissions-Policy', r.securityAudit.permissionsPolicy],
+      ].flatMap(([name, value]) => (value === null && name ? [name] : [])),
       technologies: r.technologies.map((t) => ({
         name: t.name,
         category: t.category,

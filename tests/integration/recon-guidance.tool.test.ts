@@ -38,7 +38,7 @@ describe('attacksurface_recon_guidance contract', () => {
       expect.arrayContaining([
         expect.objectContaining({
           severity: 'high',
-          finding: expect.stringContaining('expires in 10'),
+          finding: expect.stringContaining('expires in 7'),
         }),
         expect.objectContaining({ severity: 'high', finding: expect.stringContaining('TLSv1.1') }),
         expect.objectContaining({
@@ -47,30 +47,18 @@ describe('attacksurface_recon_guidance contract', () => {
         }),
       ]),
     );
-    expect(result.nextToolSuggestions).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          server: 'nist-nvd-mcp-server',
-          tool: 'nvd_audit_cpe',
-          arguments: { keyword: 'nginx 1.18.0' },
-        }),
-        expect.objectContaining({
-          server: 'osv-advisory-mcp-server',
-          tool: 'osv_query_package',
-          arguments: { name: 'nginx', version: '1.18.0' },
-        }),
-      ]),
-    );
+    expect(result.nextToolSuggestions).toEqual([]);
     const log = ctx.log as MockContextLogger;
     expect(log.calls).toContainEqual(
       expect.objectContaining({ level: 'info', msg: 'Recon guidance synthesized' }),
     );
     const blocks = reconGuidanceTool.format?.(result);
-    if (blocks?.[0]?.type === 'text') {
-      expect(blocks[0].text).toContain('Defensive review — example.com');
-      expect(blocks[0].text).toContain('nist-nvd-mcp-server');
-      expect(blocks[0].text).toContain('keyword="nginx 1.18.0"');
-    }
+    expect(blocks).toEqual([{ type: 'text', text: expect.any(String) }]);
+    expect(blocks?.[0]).toMatchObject({
+      text: expect.stringContaining('Defensive review — `example.com`'),
+    });
+    expect(blocks?.[0]).toMatchObject({ text: expect.stringContaining('TLSv1.1') });
+    expect(result.priorities.some((p) => p.finding.includes('nginx'))).toBe(false);
   });
 
   it('rejects malformed findings and topic values at the Zod boundary', () => {
@@ -98,12 +86,11 @@ describe('attacksurface_recon_guidance contract', () => {
     expect(result.priorities).toEqual([
       {
         severity: 'info',
-        finding: 'No high-signal posture issues in the supplied findings.',
-        action:
-          'Broaden coverage: run map_domain at standard depth, or inspect any hosts not yet probed.',
+        finding: 'Assessment coverage is unknown from the supplied findings.',
+        action: 'Gather authorized DNS, TLS and HTTP evidence before drawing posture conclusions.',
       },
     ]);
     expect(result.nextToolSuggestions).toEqual([]);
-    expect(result.plan).toContain('Focused on filling gaps in surface coverage.');
+    expect(result.plan).toContain('Topic: coverage');
   });
 });

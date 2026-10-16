@@ -1,16 +1,16 @@
 /**
- * @fileoverview attacksurface_recon_guidance — instruction tool. Given the findings gathered so far
- * (passed in from prior tool calls), returns a prioritized DEFENSIVE review plan as markdown plus
- * pre-filled follow-up tool calls: which hosts to inspect next, which expiring certs to flag, which
- * software versions warrant a CVE lookup against an external NVD/OSV server. Read-only, no external
- * calls — pure synthesis over the supplied state. Output is a remediation/visibility plan, never an
- * exploitation playbook. Assess only assets you own or are explicitly authorized to test.
+ * @fileoverview Offline defensive guidance with local calls, topic selection and bounded pages.
  * @module mcp-server/tools/definitions/recon-guidance.tool
  */
-
+import { isIP } from 'node:net';
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { literalText } from '@/utils/literal-text.js';
+import { NextCallSchema } from '@/utils/next-call.js';
+import { RESPONSE_BYTE_TARGET, responseBytes } from '@/utils/response-budget.js';
+import { isValidHost } from '@/utils/validation.js';
 
-const FindingHostSchema = z
+/** Findings accepted by guidance and generated directly from map service evidence. */
+export const FindingHostSchema = z
   .object({
     host: z.string().describe('Hostname this finding pertains to.'),
     addresses: z.array(z.string()).optional().describe('Resolved IPs, when known.'),
@@ -19,11 +19,14 @@ const FindingHostSchema = z
       .number()
       .optional()
       .describe('Days until certificate expiry, when known.'),
-    certValidationAuthorized: z.boolean().optional().describe('Whether the cert chain validated.'),
+    certValidationAuthorized: z
+      .boolean()
+      .optional()
+      .describe('Whether the certificate chain validated.'),
     missingSecurityHeaders: z
       .array(z.string())
       .optional()
-      .describe('Security headers reported missing/weak.'),
+      .describe('Audited missing security headers.'),
     technologies: z
       .array(
         z
@@ -31,249 +34,297 @@ const FindingHostSchema = z
             name: z.string().describe('Technology name.'),
             version: z.string().optional().describe('Version when known.'),
           })
-          .describe('A detected technology and its version.'),
+          .describe('Detected technology and optional version.'),
       )
       .optional()
-      .describe('Detected technologies with versions (drives CVE-lookup suggestions).'),
+      .describe('Detected products and versions for advisory review.'),
     openPorts: z
       .array(z.number())
       .optional()
-      .describe('Open ports (e.g. from Shodan), when known.'),
+      .describe('Previously observed ports; never proof of vulnerability.'),
   })
-  .describe('Per-host findings gathered from prior tool calls.');
+  .describe('Per-host findings from prior tool calls.');
 
-const NextCallSchema = z
+const PrioritySchema = z
   .object({
-    tool: z.string().describe('Tool to call next (this server or a sibling server).'),
-    server: z.string().optional().describe('Owning server when the tool is on another MCP server.'),
-    arguments: z
-      .record(z.string(), z.unknown())
-      .describe('Pre-filled arguments for the suggested call.'),
-    rationale: z.string().describe('Why this follow-up advances the defensive review.'),
+    severity: z
+      .enum(['high', 'medium', 'low', 'info'])
+      .describe('Relative defensive review priority.'),
+    finding: z.string().describe('Observed evidence or unknown coverage.'),
+    action: z.string().describe('Recommended defensive action.'),
   })
-  .describe('A pre-filled follow-up tool call suggestion.');
+  .describe('A prioritized finding.');
+
+const OutputSchema = z.object({
+  plan: z
+    .string()
+    .describe(
+      'Concise topic and coverage summary; detailed findings and actions are in priorities.',
+    ),
+  priorities: z.array(PrioritySchema).describe('Returned priority page.'),
+  nextToolSuggestions: z.array(NextCallSchema).describe('Returned local follow-up call page.'),
+  topic: z
+    .enum(['triage', 'posture', 'coverage'])
+    .describe('Selected topic; retain on continuation.'),
+  limit: z.number().describe('Effective per-collection limit, at most 50.'),
+  priorityOffset: z.number().describe('Requested priority offset.'),
+  suggestionOffset: z.number().describe('Requested suggestion offset.'),
+  nextPriorityOffset: z.number().nullable().describe('Next priority offset, null when exhausted.'),
+  nextSuggestionOffset: z
+    .number()
+    .nullable()
+    .describe('Next suggestion offset, null when exhausted.'),
+  priorityTotal: z.number().describe('Selected priorities before paging.'),
+  suggestionTotal: z.number().describe('Selected suggestions before paging.'),
+  priorityReturnedCount: z.number().describe('Priorities returned on this page.'),
+  suggestionReturnedCount: z.number().describe('Suggestions returned on this page.'),
+  oversize: z
+    .boolean()
+    .describe('A complete single record or required metadata exceeds the byte target.'),
+  pageInstructions: z.string().describe('Continuation instructions and byte-target exceptions.'),
+  truncated: z.boolean().describe('Selected priorities or suggestions remain for another page.'),
+});
+type Output = z.infer<typeof OutputSchema>;
+type Priority = z.infer<typeof PrioritySchema>;
 
 export const reconGuidanceTool = tool('attacksurface_recon_guidance', {
   title: 'attacksurface_recon_guidance',
   description:
-    'Synthesize findings gathered so far into a prioritized defensive review plan plus pre-filled follow-up tool calls. Given live hosts, TLS/cert state, missing security headers, detected software versions, and open ports, returns markdown guidance (what to remediate first, which certs are expiring, which versions warrant a CVE check) and concrete next calls — including chaining detected software to an external NVD or OSV vulnerability server. Read-only and offline: reasons only over the state passed in, makes no external calls, and never produces an exploitation plan. For assets you own or are authorized to assess.',
+    'Synthesize supplied findings into an offline defensive review plan and executable local follow-up calls. triage orders all findings by urgency; posture selects TLS/header hardening; coverage selects inspection/version gaps and observed-service review. Versioned products retain host/product/version advisory-check instructions without external executable calls. Stateless pages target 24,000 serialized bytes across both response surfaces, except one complete oversized record. Makes no external calls or active scans. For assets you own or are authorized to assess.',
   annotations: { readOnlyHint: true, openWorldHint: false },
   input: z.object({
     findings: z
       .object({
-        domain: z.string().optional().describe('Apex domain under review, when known.'),
-        hosts: z
-          .array(FindingHostSchema)
-          .describe('Per-host findings gathered from prior tool calls.'),
+        domain: z.string().optional().describe('Apex domain under review.'),
+        hosts: z.array(FindingHostSchema).describe('Findings gathered from prior calls.'),
         registrationExpiryDays: z
           .number()
           .optional()
           .describe('Days until domain registration expiry, when known.'),
       })
-      .describe('Findings gathered so far from prior attack-surface tool calls.'),
+      .describe('Original findings; resubmit unchanged for stateless continuation.'),
     topic: z
       .enum(['triage', 'posture', 'coverage'])
       .default('triage')
       .describe(
-        '"triage" = prioritize what to fix first; "posture" = TLS/header hardening; "coverage" = gaps to fill next.',
+        'triage: all findings; posture: TLS/headers; coverage: inspection/version evidence and observed ports.',
       ),
+    limit: z
+      .number()
+      .int()
+      .positive()
+      .default(50)
+      .describe('Requested records per collection; clamped to 50.'),
+    priorityOffset: z
+      .number()
+      .int()
+      .nonnegative()
+      .default(0)
+      .describe('Priority offset; use its total to keep an exhausted collection exhausted.'),
+    suggestionOffset: z
+      .number()
+      .int()
+      .nonnegative()
+      .default(0)
+      .describe('Suggestion offset; use its total to keep an exhausted collection exhausted.'),
   }),
-  output: z.object({
-    plan: z.string().describe('Prioritized defensive review plan as markdown.'),
-    priorities: z
-      .array(
-        z
-          .object({
-            severity: z
-              .enum(['high', 'medium', 'low', 'info'])
-              .describe('Relative priority of the item.'),
-            finding: z.string().describe('What was observed.'),
-            action: z.string().describe('Recommended defensive action.'),
-          })
-          .describe('A single prioritized finding and its recommended action.'),
-      )
-      .describe('Structured priority items behind the plan.'),
-    nextToolSuggestions: z.array(NextCallSchema).describe('Pre-filled follow-up tool calls.'),
-  }),
-
+  output: OutputSchema,
   handler(input, ctx) {
-    const { findings, topic } = input;
-    const priorities: Array<{
-      severity: 'high' | 'medium' | 'low' | 'info';
-      finding: string;
-      action: string;
-    }> = [];
-    const nextToolSuggestions: z.infer<typeof NextCallSchema>[] = [];
-
-    // Registration expiry.
-    if (findings.registrationExpiryDays !== undefined) {
-      if (findings.registrationExpiryDays < 0) {
-        priorities.push({
-          severity: 'high',
-          finding: `Domain registration expired ${Math.abs(findings.registrationExpiryDays)} day(s) ago.`,
-          action: 'Renew the domain registration immediately to prevent takeover.',
-        });
-      } else if (findings.registrationExpiryDays < 30) {
-        priorities.push({
-          severity: 'high',
-          finding: `Domain registration expires in ${findings.registrationExpiryDays} day(s).`,
-          action: 'Renew the registration and enable auto-renew + registrar lock.',
-        });
+    const priorities: Priority[] = [];
+    const suggestions: z.infer<typeof NextCallSchema>[] = [];
+    const posture = input.topic !== 'coverage',
+      coverage = input.topic !== 'posture';
+    const add = (severity: Priority['severity'], finding: string, action: string) =>
+      priorities.push({ severity, finding, action });
+    const expiry = input.findings.registrationExpiryDays;
+    if (input.topic === 'triage' && expiry !== undefined && expiry < 30)
+      add(
+        'high',
+        expiry < 0
+          ? `Domain registration expired ${Math.abs(expiry)} day(s) ago.`
+          : `Domain registration expires in ${expiry} day(s).`,
+        'Renew the domain registration and enable auto-renew and registrar lock.',
+      );
+    for (const h of input.findings.hosts) {
+      if (posture) {
+        const days = h.certDaysUntilExpiry;
+        if (days !== undefined && days < 30)
+          add(
+            days < 14 ? 'high' : 'medium',
+            days < 0
+              ? `${h.host}: TLS certificate expired ${Math.abs(days)} day(s) ago.`
+              : `${h.host}: TLS certificate expires in ${days} day(s).`,
+            days < 14
+              ? 'Renew now; automate certificate renewal.'
+              : 'Schedule renewal and verify automation.',
+          );
+        if (h.certValidationAuthorized === false)
+          add(
+            'high',
+            `${h.host}: TLS chain did not validate.`,
+            'Review chain trust and deploy the correct certificate and full chain.',
+          );
+        if (h.tlsProtocol && ['TLSv1', 'TLSv1.0', 'TLSv1.1', 'SSLv3'].includes(h.tlsProtocol))
+          add(
+            'high',
+            `${h.host}: negotiated deprecated protocol ${h.tlsProtocol}.`,
+            'Disable deprecated protocols; require TLS 1.2 or later.',
+          );
+        if (h.missingSecurityHeaders?.length)
+          add(
+            'medium',
+            `${h.host}: missing/weak security headers — ${h.missingSecurityHeaders.join(', ')}.`,
+            'Add the missing security headers and verify their policy values.',
+          );
       }
-    }
-
-    for (const h of findings.hosts) {
-      // Cert expiry.
-      if (h.certDaysUntilExpiry !== undefined) {
-        if (h.certDaysUntilExpiry < 0) {
-          priorities.push({
-            severity: 'high',
-            finding: `${h.host}: TLS certificate expired ${Math.abs(h.certDaysUntilExpiry)} day(s) ago.`,
-            action: 'Reissue and deploy a valid certificate; clients are seeing errors now.',
-          });
-        } else if (h.certDaysUntilExpiry < 14) {
-          priorities.push({
-            severity: 'high',
-            finding: `${h.host}: TLS certificate expires in ${h.certDaysUntilExpiry} day(s).`,
-            action: 'Renew now; automate renewal (ACME) to avoid recurrence.',
-          });
-        } else if (h.certDaysUntilExpiry < 30) {
-          priorities.push({
-            severity: 'medium',
-            finding: `${h.host}: TLS certificate expires in ${h.certDaysUntilExpiry} day(s).`,
-            action: 'Schedule renewal; verify automation is in place.',
-          });
+      if (coverage) {
+        for (const tech of h.technologies ?? [])
+          add(
+            'info',
+            tech.version
+              ? `${h.host}: ${tech.name} ${tech.version} detected.`
+              : `${h.host}: ${tech.name} detected without a version.`,
+            tech.version
+              ? `Check ${tech.name} ${tech.version} on ${h.host} against authoritative vendor advisories and CVE records; confirm applicability before remediation.`
+              : 'Identify the exact product version before checking advisories.',
+          );
+        if (h.tlsProtocol === undefined) {
+          add(
+            'info',
+            `${h.host}: TLS posture is unknown.`,
+            'Inspect a known TLS service to establish certificate and protocol evidence.',
+          );
+          if (isValidHost(h.host) && h.addresses?.length)
+            suggestions.push({
+              toolName: 'attacksurface_inspect_tls',
+              args: { hosts: [h.host], port: 443 },
+              reason: `${h.host} resolved but has no TLS posture; inspect its known HTTPS service.`,
+            });
+        }
+        if (h.missingSecurityHeaders === undefined) {
+          add(
+            'info',
+            `${h.host}: HTTP header inspection coverage is unknown.`,
+            'Read the authorized HTTP service to collect header and technology evidence.',
+          );
+          if (isValidHost(h.host))
+            suggestions.push({
+              toolName: 'attacksurface_probe_http',
+              args: { url: `https://${isIP(h.host) === 6 ? `[${h.host}]` : h.host}` },
+              reason: `${h.host} has no HTTP header evidence; inspect its published HTTPS surface.`,
+            });
+        }
+        for (const port of h.openPorts ?? []) {
+          const service = port === 22 ? 'SSH' : port === 3389 ? 'RDP' : 'service';
+          add(
+            'info',
+            `${h.host}: observed ${service} port ${port}.`,
+            'Review inventory, intended exposure and access controls; an observed port is not evidence of a vulnerability.',
+          );
+          if (isValidHost(h.host) && port === 8443)
+            suggestions.push({
+              toolName: 'attacksurface_inspect_tls',
+              args: { hosts: [h.host], port },
+              reason: `Review the observed TLS service on ${h.host}:${port}; no port scanning is performed.`,
+            });
         }
       }
-
-      // Cert validation.
-      if (h.certValidationAuthorized === false) {
-        priorities.push({
-          severity: 'high',
-          finding: `${h.host}: TLS chain did not validate (self-signed, expired, or wrong host).`,
-          action: 'Install a publicly-trusted certificate with the correct SANs and full chain.',
-        });
-      }
-
-      // Weak TLS.
-      if (h.tlsProtocol && /TLSv1(\.1)?$|SSLv3/.test(h.tlsProtocol)) {
-        priorities.push({
-          severity: 'high',
-          finding: `${h.host}: negotiated deprecated protocol ${h.tlsProtocol}.`,
-          action: 'Disable TLS 1.0/1.1 and SSLv3; require TLS 1.2+ (prefer 1.3).',
-        });
-      }
-
-      // Missing headers.
-      if (h.missingSecurityHeaders && h.missingSecurityHeaders.length > 0) {
-        priorities.push({
-          severity: 'medium',
-          finding: `${h.host}: missing/weak security headers — ${h.missingSecurityHeaders.join(', ')}.`,
-          action: 'Add the missing headers (HSTS, CSP, X-Frame-Options, X-Content-Type-Options).',
-        });
-      }
-
-      // Software → CVE lookup chaining (cross-server).
-      for (const tech of h.technologies ?? []) {
-        if (tech.version) {
-          nextToolSuggestions.push({
-            tool: 'nvd_audit_cpe',
-            server: 'nist-nvd-mcp-server',
-            arguments: { keyword: `${tech.name} ${tech.version}` },
-            rationale: `${h.host} discloses ${tech.name} ${tech.version}; check for known CVEs against that version.`,
-          });
-          nextToolSuggestions.push({
-            tool: 'osv_query_package',
-            server: 'osv-advisory-mcp-server',
-            arguments: { name: tech.name, version: tech.version },
-            rationale: `Cross-check ${tech.name} ${tech.version} against the OSV advisory database.`,
-          });
-        } else {
-          priorities.push({
-            severity: 'info',
-            finding: `${h.host}: ${tech.name} detected without a version.`,
-            action:
-              'Identify the exact version (banner/changelog) before a CVE lookup is meaningful.',
-          });
-        }
-      }
-
-      // Re-inspect suggestions for hosts lacking posture data.
-      if (h.tlsProtocol === undefined && h.addresses && h.addresses.length > 0) {
-        nextToolSuggestions.push({
-          tool: 'attacksurface_inspect_tls',
-          arguments: { hosts: [h.host] },
-          rationale: `${h.host} resolved but has no TLS posture yet; inspect its certificate and protocol.`,
-        });
-      }
     }
-
-    if (priorities.length === 0) {
-      priorities.push({
-        severity: 'info',
-        finding: 'No high-signal posture issues in the supplied findings.',
-        action:
-          'Broaden coverage: run map_domain at standard depth, or inspect any hosts not yet probed.',
-      });
+    if (!priorities.length) {
+      const hasEvidence =
+        (input.topic === 'triage' && expiry !== undefined) ||
+        input.findings.hosts.some(
+          (host) =>
+            host.tlsProtocol !== undefined ||
+            host.certDaysUntilExpiry !== undefined ||
+            host.certValidationAuthorized !== undefined ||
+            host.missingSecurityHeaders !== undefined,
+        );
+      add(
+        'info',
+        hasEvidence
+          ? 'No selected findings require action based on the supplied evidence.'
+          : 'Assessment coverage is unknown from the supplied findings.',
+        hasEvidence
+          ? 'Retain the supplied evidence and review any inspection gaps before drawing broader conclusions.'
+          : 'Gather authorized DNS, TLS and HTTP evidence before drawing posture conclusions.',
+      );
     }
-
-    const plan = renderPlan(findings.domain, topic, priorities, nextToolSuggestions);
-    ctx.log.info('Recon guidance synthesized', {
-      hostCount: findings.hosts.length,
-      priorityCount: priorities.length,
-      suggestionCount: nextToolSuggestions.length,
+    const order = { high: 0, medium: 1, low: 2, info: 3 };
+    priorities.sort((a, b) => order[a.severity] - order[b.severity]);
+    const limit = Math.min(input.limit, 50);
+    const selectedP = priorities.slice(input.priorityOffset, input.priorityOffset + limit);
+    const selectedS = suggestions.slice(input.suggestionOffset, input.suggestionOffset + limit);
+    const build = (p: number, s: number, oversize = false): Output => ({
+      plan: `Defensive review${input.findings.domain ? ` — ${literalText(input.findings.domain)}` : ''}. Topic: ${input.topic}; ${p} of ${priorities.length} priorities and ${s} of ${suggestions.length} local calls on this page. Assess only assets you own or are authorized to assess.`,
+      priorities: selectedP.slice(0, p),
+      nextToolSuggestions: selectedS.slice(0, s),
+      topic: input.topic,
+      limit,
+      priorityOffset: input.priorityOffset,
+      suggestionOffset: input.suggestionOffset,
+      nextPriorityOffset:
+        input.priorityOffset + p < priorities.length ? input.priorityOffset + p : null,
+      nextSuggestionOffset:
+        input.suggestionOffset + s < suggestions.length ? input.suggestionOffset + s : null,
+      priorityTotal: priorities.length,
+      suggestionTotal: suggestions.length,
+      priorityReturnedCount: p,
+      suggestionReturnedCount: s,
+      oversize,
+      pageInstructions: `Continue with the original findings and topic, using each next offset; when null, use that collection's total to keep it exhausted.${oversize ? ' One complete oversized record or required metadata exceeds the 24,000-byte target.' : ''}`,
+      truncated:
+        input.priorityOffset + p < priorities.length ||
+        input.suggestionOffset + s < suggestions.length,
     });
-
-    return { plan, priorities, nextToolSuggestions };
-  },
-
-  format: (result) => {
-    const lines: string[] = [result.plan, '', '## Priorities'];
-    for (const p of result.priorities) {
-      lines.push(`- **[${p.severity}]** ${p.finding} → ${p.action}`);
+    let p = 0,
+      s = 0;
+    while (p < selectedP.length || s < selectedS.length) {
+      const nextP = p < selectedP.length ? p + 1 : p;
+      const nextS = nextP === p && s < selectedS.length ? s + 1 : s;
+      const candidate = build(nextP, nextS);
+      if (responseBytes(candidate, formatGuidance(candidate)) > RESPONSE_BYTE_TARGET) {
+        if (p + s === 0) {
+          p = nextP;
+          s = nextS;
+        }
+        break;
+      }
+      p = nextP;
+      s = nextS;
     }
-    lines.push('## Suggested next calls');
-    if (result.nextToolSuggestions.length === 0) lines.push('- (none)');
-    for (const s of result.nextToolSuggestions) {
-      const where = s.server ? `${s.server} → ${s.tool}` : s.tool;
-      lines.push(`- **${where}** — ${s.rationale}`);
-      const args = Object.entries(s.arguments)
-        .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
-        .join(', ');
-      lines.push(`  - arguments: ${args}`);
-    }
-    return [{ type: 'text', text: lines.join('\n') }];
+    let result = build(p, s);
+    if (responseBytes(result, formatGuidance(result)) > RESPONSE_BYTE_TARGET)
+      result = build(p, s, true);
+    ctx.log.info('Recon guidance synthesized', {
+      hostCount: input.findings.hosts.length,
+      priorityCount: priorities.length,
+      suggestionCount: suggestions.length,
+    });
+    return result;
   },
+  format: formatGuidance,
 });
 
-/** Render the markdown plan from the structured priorities. */
-function renderPlan(
-  domain: string | undefined,
-  topic: 'triage' | 'posture' | 'coverage',
-  priorities: Array<{ severity: string; finding: string; action: string }>,
-  suggestions: z.infer<typeof NextCallSchema>[],
-): string {
-  const heading = domain ? `Defensive review — ${domain}` : 'Defensive review';
-  const topicLine = {
-    triage: 'Prioritized by remediation urgency.',
-    posture: 'Focused on TLS and HTTP hardening.',
-    coverage: 'Focused on filling gaps in surface coverage.',
-  }[topic];
-
-  const order = { high: 0, medium: 1, low: 2, info: 3 } as const;
-  const sorted = [...priorities].sort(
-    (a, b) =>
-      (order[a.severity as keyof typeof order] ?? 9) -
-      (order[b.severity as keyof typeof order] ?? 9),
-  );
-
-  const lines: string[] = [`# ${heading}`, `_${topicLine}_`, ''];
-  for (const p of sorted) {
-    lines.push(`- **[${p.severity.toUpperCase()}]** ${p.finding}`);
-    lines.push(`  - → ${p.action}`);
-  }
-  if (suggestions.length > 0) {
-    lines.push('', `${suggestions.length} pre-filled follow-up call(s) are attached below.`);
-  }
-  return lines.join('\n');
+/** Complete text twin used for actual output and byte fitting. */
+function formatGuidance(result: Output): Array<{ type: 'text'; text: string }> {
+  return [
+    {
+      type: 'text',
+      text: [
+        result.plan,
+        '## Priorities',
+        ...result.priorities.map(
+          (p) => `- **[${p.severity}]** ${literalText(p.finding)} → ${literalText(p.action)}`,
+        ),
+        '## Suggested next calls',
+        ...result.nextToolSuggestions.map(
+          (s) =>
+            `${literalText(s.toolName)} — ${literalText(s.reason)}; args=${literalText(JSON.stringify(s.args))}`,
+        ),
+        `topic=${result.topic}; limit=${result.limit}; priorityOffset=${result.priorityOffset}; suggestionOffset=${result.suggestionOffset}; nextPriorityOffset=${result.nextPriorityOffset}; nextSuggestionOffset=${result.nextSuggestionOffset}; priorityTotal=${result.priorityTotal}; suggestionTotal=${result.suggestionTotal}; priorityReturnedCount=${result.priorityReturnedCount}; suggestionReturnedCount=${result.suggestionReturnedCount}; oversize=${result.oversize}`,
+        `truncated=${result.truncated}; ${result.pageInstructions}`,
+      ].join('\n'),
+    },
+  ];
 }

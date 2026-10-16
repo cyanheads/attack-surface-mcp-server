@@ -9,12 +9,15 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getServerConfig } from '@/config/server-config.js';
 import { getCtService } from '@/services/ct/ct-service.js';
 import type { CtSource } from '@/services/ct/types.js';
 import { getDnsService } from '@/services/dns/dns-service.js';
 import { getTlsService } from '@/services/tls/tls-service.js';
 import { discoveryPool } from '@/utils/discovery.js';
 import { literalText } from '@/utils/literal-text.js';
+import { NextCallSchema } from '@/utils/next-call.js';
+import { RESPONSE_BYTE_TARGET, responseBytes } from '@/utils/response-budget.js';
 import { isValidDomain, normalizeDomain } from '@/utils/validation.js';
 
 const SourceEnum = z.enum(['crt.sh', 'certspotter', 'tls-san']);
@@ -68,8 +71,44 @@ export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains'
       .describe(
         'When true, include names that did not resolve. When false, return only live hosts.',
       ),
+    offset: z
+      .number()
+      .int()
+      .nonnegative()
+      .default(0)
+      .describe('Offset into current sorted CT candidates; data changes can shift offsets.'),
+    limit: z
+      .number()
+      .int()
+      .positive()
+      .default(50)
+      .describe(
+        'Requested candidate count; effective limit is min(request, 50, ATTACKSURFACE_MAX_SUBDOMAINS).',
+      ),
   }),
   output: z.object({
+    offset: z.number().describe('Requested candidate offset.'),
+    limit: z.number().describe('Effective candidate work limit.'),
+    nextOffset: z
+      .number()
+      .nullable()
+      .describe('Next consumed-candidate offset, or null when exhausted.'),
+    discoveredCount: z.number().describe('Current discovered candidate total.'),
+    examinedCount: z
+      .number()
+      .describe('Candidates resolved on this call, including undelivered suffix.'),
+    returnedCount: z
+      .number()
+      .describe('Returned subdomain count after filtering and byte fitting.'),
+    remainingCount: z.number().describe('Candidates remaining after the consumed prefix.'),
+    oversize: z
+      .boolean()
+      .describe('One complete record or required metadata exceeds the byte target.'),
+    pageInstructions: z.string().describe('Stateless offset and oversize guidance.'),
+    truncated: z.boolean().describe('More candidates remain for another page.'),
+    continuation: NextCallSchema.nullable().describe(
+      'Next enumeration call preserving sources and filter.',
+    ),
     domain: z.string().describe('Apex domain queried (normalized).'),
     subdomains: z
       .array(SubdomainSchema)
@@ -90,17 +129,6 @@ export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains'
         'Operational failures for nonlive candidates filtered out of subdomains; empty when none were filtered.',
       ),
   }),
-  enrichment: {
-    notice: z
-      .string()
-      .optional()
-      .describe('Guidance when no source answered or nothing was found.'),
-    totalCount: z
-      .number()
-      .optional()
-      .describe('Total distinct names discovered before any liveness filter.'),
-    liveCount: z.number().optional().describe('Count of names that resolved to an address.'),
-  },
   errors: [
     {
       reason: 'invalid_domain',
@@ -161,14 +189,17 @@ export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains'
       );
     }
 
-    const allNames = ct.names.map((n) => n.name);
+    const sorted = [...ct.names].sort((a, b) => a.name.localeCompare(b.name));
+    const discoveredCount = sorted.length;
+    const limit = Math.min(input.limit, 50, getServerConfig().maxSubdomains);
+    const selected = sorted.slice(input.offset, input.offset + limit);
     const liveness = await discoveryPool(
-      allNames,
+      selected.map((n) => n.name),
       (name) => getDnsService().resolveAddressStatus(name, undefined, ctx.signal),
       ctx.signal,
     );
 
-    let subdomains = ct.names.map((n) => {
+    const records = selected.map((n) => {
       const result = liveness.get(n.name);
       const addresses = result?.value?.addresses ?? [];
       return {
@@ -180,49 +211,108 @@ export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains'
       };
     });
 
-    const liveCount = subdomains.filter((s) => s.resolved).length;
-    const filteredAddressErrors = input.includeUnresolved
-      ? []
-      : subdomains.flatMap((s) =>
-          !s.resolved && s.addressError ? [{ name: s.name, addressError: s.addressError }] : [],
-        );
-    if (!input.includeUnresolved) {
-      subdomains = subdomains.filter((s) => s.resolved);
+    const build = (consumed: number, oversize = false) => {
+      const prefix = records.slice(0, consumed);
+      const subdomains = prefix.filter((s) => input.includeUnresolved || s.resolved);
+      const nextOffset = input.offset + consumed < discoveredCount ? input.offset + consumed : null;
+      return {
+        domain,
+        subdomains,
+        sourceStatuses: ct.sourceStatuses,
+        filteredAddressErrors: input.includeUnresolved
+          ? []
+          : prefix.flatMap((s) =>
+              !s.resolved && s.addressError ? [{ name: s.name, addressError: s.addressError }] : [],
+            ),
+        offset: input.offset,
+        limit,
+        nextOffset,
+        discoveredCount,
+        examinedCount: selected.length,
+        returnedCount: subdomains.length,
+        remainingCount: Math.max(0, discoveredCount - input.offset - consumed),
+        oversize,
+        pageInstructions: `${discoveredCount === 0 ? `No subdomains found in CT logs for ${domain}. ` : ''}Continuation re-reads current CT data; changes can shift offsets. Examined but undelivered candidates are re-resolved.${oversize ? ' One complete oversized record or required source metadata exceeds the 24,000-byte target.' : ''}`,
+        truncated: nextOffset !== null,
+        continuation:
+          nextOffset === null
+            ? null
+            : {
+                toolName: 'attacksurface_enumerate_subdomains',
+                reason: 'Read the next candidate prefix; current CT changes can shift offsets.',
+                args: {
+                  domain,
+                  sources,
+                  includeUnresolved: input.includeUnresolved,
+                  offset: nextOffset,
+                  limit,
+                },
+              },
+      };
+    };
+    let consumed = 0;
+    for (let count = 1; count <= records.length; count++) {
+      const candidate = build(count);
+      if (responseBytes(candidate, formatEnumeration(candidate)) > RESPONSE_BYTE_TARGET) {
+        if (consumed === 0) consumed = count;
+        break;
+      }
+      consumed = count;
     }
-
-    ctx.enrich({ totalCount: allNames.length, liveCount });
-    if (allNames.length === 0) {
-      ctx.enrich.notice(
-        `No subdomains found in CT logs for "${domain}". The domain may use only wildcard or pre-CT certificates, or the sources were unavailable.`,
-      );
-    }
-
-    return { domain, subdomains, sourceStatuses: ct.sourceStatuses, filteredAddressErrors };
+    let result = build(consumed);
+    if (responseBytes(result, formatEnumeration(result)) > RESPONSE_BYTE_TARGET)
+      result = build(consumed, true);
+    return result;
   },
-
-  format: (result) => {
-    const lines: string[] = [];
-    lines.push(`## Subdomains for ${result.domain}`);
-    lines.push('**Sources:**');
-    for (const s of result.sourceStatuses) {
-      lines.push(
-        `- ${s.source}: ok=${s.ok}, count=${s.count}, error=${literalText(s.sourceError ?? 'none')}`,
-      );
-      if (s.complete !== undefined)
-        lines.push(
-          `  - complete=${s.complete}, pagesFetched=${s.pagesFetched}, incompleteReason=${s.incompleteReason ?? 'none'}`,
-        );
-    }
-    lines.push(`\n**${result.subdomains.length} name(s):**`);
-    for (const s of result.subdomains) {
-      lines.push(
-        `- **${s.name}** _(${s.sources.join(', ')})_ — resolved=${s.resolved} → ${s.addresses.join(', ') || 'none'}; addressError=${literalText(s.addressError ?? 'none')}`,
-      );
-    }
-    lines.push('**Filtered address failures:**');
-    for (const failure of result.filteredAddressErrors)
-      lines.push(`- ${literalText(failure.name)}: ${literalText(failure.addressError)}`);
-    if (result.filteredAddressErrors.length === 0) lines.push('none');
-    return [{ type: 'text', text: lines.join('\n') }];
-  },
+  format: formatEnumeration,
 });
+
+/** Render complete enumeration records, source status and continuation metadata. */
+function formatEnumeration(result: {
+  domain: string;
+  subdomains: z.infer<typeof SubdomainSchema>[];
+  sourceStatuses: z.infer<typeof SourceStatusSchema>[];
+  filteredAddressErrors: Array<{ name: string; addressError: string }>;
+  offset: number;
+  limit: number;
+  nextOffset: number | null;
+  discoveredCount: number;
+  examinedCount: number;
+  returnedCount: number;
+  remainingCount: number;
+  oversize: boolean;
+  pageInstructions: string;
+  truncated: boolean;
+  continuation: z.infer<typeof NextCallSchema> | null;
+}): Array<{ type: 'text'; text: string }> {
+  const lines: string[] = [];
+  lines.push(`## Subdomains for ${result.domain}`);
+  lines.push('**Sources:**');
+  for (const s of result.sourceStatuses) {
+    lines.push(
+      `- ${s.source}: ok=${s.ok}, count=${s.count}, error=${literalText(s.sourceError ?? 'none')}`,
+    );
+    if (s.complete !== undefined)
+      lines.push(
+        `  - complete=${s.complete}, pagesFetched=${s.pagesFetched}, incompleteReason=${s.incompleteReason ?? 'none'}`,
+      );
+  }
+  lines.push(`\n**${result.subdomains.length} name(s):**`);
+  for (const s of result.subdomains) {
+    lines.push(
+      `- **${s.name}** _(${s.sources.join(', ')})_ — resolved=${s.resolved} → ${s.addresses.join(', ') || 'none'}; addressError=${literalText(s.addressError ?? 'none')}`,
+    );
+  }
+  lines.push('**Filtered address failures:**');
+  for (const failure of result.filteredAddressErrors)
+    lines.push(`- ${literalText(failure.name)}: ${literalText(failure.addressError)}`);
+  if (result.filteredAddressErrors.length === 0) lines.push('none');
+  lines.push(
+    `offset=${result.offset}; limit=${result.limit}; nextOffset=${result.nextOffset}; discoveredCount=${result.discoveredCount}; examinedCount=${result.examinedCount}; returnedCount=${result.returnedCount}; remainingCount=${result.remainingCount}; oversize=${result.oversize}`,
+  );
+  lines.push(
+    `truncated=${result.truncated}; ${result.pageInstructions}`,
+    `continuation=${literalText(JSON.stringify(result.continuation))}`,
+  );
+  return [{ type: 'text', text: lines.join('\n') }];
+}

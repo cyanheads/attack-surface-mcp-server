@@ -30,14 +30,16 @@ const ServerConfigSchema = z.object({
     .string()
     .default(DEFAULT_USER_AGENT)
     .describe('Default User-Agent string for HTTP probes.'),
-  /** Cap on subdomains resolved during a `map_domain` run — bounds fan-out cost. */
+  /** Map/snapshot resolution cap; enumeration also applies a 50-candidate page ceiling. */
   maxSubdomains: z.coerce
     .number()
     .int()
     .min(1)
     .max(5000)
     .default(200)
-    .describe('Maximum subdomains resolved per map_domain run.'),
+    .describe(
+      'Maximum map/snapshot resolution work; enumeration resolves min(this value, 50, requested limit) candidates per page.',
+    ),
   /** RDAP bootstrap base; override for a private/mirrored RDAP. */
   rdapBootstrapUrl: z
     .string()

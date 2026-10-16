@@ -4,6 +4,7 @@
  */
 import { z } from '@cyanheads/mcp-ts-core';
 import { literalText } from './literal-text.js';
+import { NextCallSchema } from './next-call.js';
 
 /** DNS absence or a closed TLS port is ordinary absence of the optional SAN source. */
 export function isTlsSourceAbsent(error: unknown): boolean {
@@ -85,15 +86,7 @@ export const CoverageSchema = z
       .describe('Live hosts with requested posture attempted; zero at quick depth.'),
     detailOmitted: z.array(z.string()).describe('Live hosts omitted by the snapshot detail cap.'),
     retrieval: z
-      .array(
-        z
-          .object({
-            toolName: z.string().describe('Existing tool to call.'),
-            args: z.record(z.string(), z.unknown()).describe('Executable arguments for that tool.'),
-            reason: z.string().describe('How to repeat this example for remaining omissions.'),
-          })
-          .describe('One bounded follow-up call.'),
-      )
+      .array(NextCallSchema)
       .describe(
         'At most three executable examples; repeat over unexamined then detailOmitted names. DNS/TLS batches never exceed 50 hosts.',
       ),

@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const dnsBoundary = vi.hoisted(() => ({ lookup: vi.fn(), resolve: vi.fn() }));
@@ -60,6 +60,140 @@ describe('attacksurface_enumerate_subdomains', () => {
     vi.useRealTimers();
   });
 
+  it('preselects a bounded sorted candidate prefix and advances a wholly filtered page', async () => {
+    const names = Array.from(
+      { length: 120 },
+      (_, i) => `h${String(i).padStart(3, '0')}.example.com`,
+    );
+    fetchMock.mockImplementation(async () =>
+      Response.json([{ name_value: names.toReversed().join('\n') }]),
+    );
+    dnsBoundary.resolve.mockResolvedValue([]);
+    let offset = 0;
+    for (const expected of [50, 50, 20, 0]) {
+      dnsBoundary.resolve.mockClear();
+      const result = await runToolContract(enumerateSubdomainsTool, {
+        domain: 'example.com',
+        sources: ['crt.sh'],
+        includeUnresolved: false,
+        offset,
+        limit: 999,
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        limit: 50,
+        offset,
+        discoveredCount: 120,
+        examinedCount: expected,
+        returnedCount: 0,
+        nextOffset: offset + expected < 120 ? offset + expected : null,
+        remainingCount: Math.max(0, 120 - offset - expected),
+      });
+      expect(dnsBoundary.resolve).toHaveBeenCalledTimes(expected * 2);
+      expect(
+        dnsBoundary.resolve.mock.calls.filter(([type]) => type === 'A').map(([, host]) => host),
+      ).toEqual(names.slice(offset, offset + expected));
+      const output = enumerateSubdomainsTool.output.parse(result.structuredContent);
+      expect(JSON.stringify(result.content)).toContain(`remainingCount=${output.remainingCount}`);
+      if (output.nextOffset !== null) {
+        expect(output.continuation?.args).toEqual({
+          domain: 'example.com',
+          sources: ['crt.sh'],
+          includeUnresolved: false,
+          offset: output.nextOffset,
+          limit: 50,
+        });
+        offset = enumerateSubdomainsTool.input.parse(output.continuation?.args).offset;
+      } else {
+        expect(output.continuation).toBeNull();
+        offset = 120;
+      }
+    }
+    expect(
+      enumerateSubdomainsTool.input.safeParse({ domain: 'example.com', offset: -1 }).success,
+    ).toBe(false);
+  });
+
+  it('honors a lower configured candidate cap without losing filtered failures', async () => {
+    vi.stubEnv('ATTACKSURFACE_MAX_SUBDOMAINS', '1');
+    resetServerConfig();
+    fetchMock.mockImplementation(async () =>
+      Response.json([{ name_value: 'a.example.com\nb.example.com' }]),
+    );
+    dnsBoundary.resolve.mockRejectedValue(
+      Object.assign(new Error('SERVFAIL'), { code: 'ESERVFAIL' }),
+    );
+    const first = await runToolContract(enumerateSubdomainsTool, {
+      domain: 'example.com',
+      sources: ['crt.sh'],
+      includeUnresolved: false,
+    });
+    expect(first.structuredContent).toMatchObject({
+      limit: 1,
+      examinedCount: 1,
+      returnedCount: 0,
+      nextOffset: 1,
+      remainingCount: 1,
+      filteredAddressErrors: [
+        { name: 'a.example.com', addressError: 'A: SERVFAIL; AAAA: SERVFAIL' },
+      ],
+    });
+    expect(JSON.stringify(first.content)).toContain('a.example.com');
+    expect(JSON.stringify(first.content)).toContain('SERVFAIL');
+    expect(dnsBoundary.resolve).toHaveBeenCalledTimes(2);
+    const call = first.structuredContent?.continuation as { args: unknown };
+    expect(enumerateSubdomainsTool.input.safeParse(call.args).success).toBe(true);
+    const second = await runToolContract(enumerateSubdomainsTool, call.args);
+    expect(second.structuredContent).toMatchObject({
+      nextOffset: null,
+      remainingCount: 0,
+      filteredAddressErrors: [{ name: 'b.example.com' }],
+    });
+  });
+
+  it('re-resolves examined but undelivered records and permits a complete oversized record', async () => {
+    const names = ['a.example.com', 'b.example.com', 'c.example.com'];
+    fetchMock.mockImplementation(async () => Response.json([{ name_value: names.join('\n') }]));
+    dnsBoundary.resolve.mockImplementation(async (type, host) =>
+      type === 'A'
+        ? Array.from(
+            { length: host === names[0] ? 5 : 4000 },
+            (_, i) => `93.184.${Math.floor(i / 256)}.${i % 256}`,
+          )
+        : [],
+    );
+    const first = await runToolContract(enumerateSubdomainsTool, {
+      domain: 'example.com',
+      sources: ['crt.sh'],
+    });
+    expect(first.structuredContent).toMatchObject({
+      examinedCount: 3,
+      returnedCount: 1,
+      nextOffset: 1,
+      oversize: false,
+    });
+    expect(
+      Buffer.byteLength(
+        JSON.stringify({ structuredContent: first.structuredContent, content: first.content }),
+      ),
+    ).toBeLessThanOrEqual(24000);
+    dnsBoundary.resolve.mockClear();
+    const second = await runToolContract(enumerateSubdomainsTool, {
+      domain: 'example.com',
+      sources: ['crt.sh'],
+      offset: 1,
+    });
+    expect(second.structuredContent).toMatchObject({
+      examinedCount: 2,
+      returnedCount: 1,
+      nextOffset: 2,
+      oversize: true,
+    });
+    expect(dnsBoundary.resolve).toHaveBeenCalledWith('A', names[1]);
+    expect(JSON.stringify(second.content)).toContain('oversized');
+    expect(second.structuredContent?.subdomains).toHaveLength(1);
+  });
+
   it('returns normalized provenance and liveness with complete structured/format output', async () => {
     fetchMock.mockResolvedValue(
       new Response(
@@ -82,7 +216,7 @@ describe('attacksurface_enumerate_subdomains', () => {
     );
 
     expect(result).toEqual(expect.schemaMatching(enumerateSubdomainsTool.output));
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       domain: 'example.com',
       filteredAddressErrors: [],
       subdomains: [
@@ -103,7 +237,13 @@ describe('attacksurface_enumerate_subdomains', () => {
       ],
       sourceStatuses: [{ source: 'crt.sh', ok: true, count: 2, sourceError: null }],
     });
-    expect(getEnrichment(ctx)).toEqual({ totalCount: 2, liveCount: 1 });
+    expect(result).toMatchObject({
+      discoveredCount: 2,
+      examinedCount: 2,
+      returnedCount: 2,
+      remainingCount: 0,
+      nextOffset: null,
+    });
     const blocks = enumerateSubdomainsTool.format?.(result);
     if (blocks?.[0]?.type === 'text') {
       expect(blocks[0].text).toContain('api.example.com');
@@ -272,10 +412,10 @@ describe('attacksurface_enumerate_subdomains', () => {
     );
 
     expect(result.subdomains).toEqual([]);
-    expect(getEnrichment(ctx)).toEqual({
-      totalCount: 0,
-      liveCount: 0,
-      notice: expect.stringContaining('No subdomains found'),
+    expect(result).toMatchObject({
+      discoveredCount: 0,
+      examinedCount: 0,
+      pageInstructions: expect.stringContaining('No subdomains found'),
     });
   });
 });

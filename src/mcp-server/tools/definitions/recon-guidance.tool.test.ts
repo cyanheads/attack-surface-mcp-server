@@ -20,25 +20,29 @@ describe('attacksurface_recon_guidance', () => {
     expect(high?.finding).toMatch(/expired/i);
   });
 
-  it('suggests a cross-server CVE lookup for versioned software', async () => {
+  it('retains product/version advisory review without external executable calls', async () => {
     const result = await run({
       findings: {
         hosts: [{ host: 'app.example.com', technologies: [{ name: 'nginx', version: '1.18.0' }] }],
       },
     });
-    const nvd = result.nextToolSuggestions.find((s) => s.server === 'nist-nvd-mcp-server');
-    expect(nvd).toBeDefined();
-    expect(nvd?.arguments).toMatchObject({ keyword: 'nginx 1.18.0' });
-    expect(result.nextToolSuggestions.some((s) => s.server === 'osv-advisory-mcp-server')).toBe(
-      true,
-    );
+    expect(
+      result.priorities.some(
+        (p) => p.finding.includes('nginx 1.18.0') && p.action.includes('advisories'),
+      ),
+    ).toBe(true);
+    expect(result.nextToolSuggestions.map((s) => [s.toolName, s.args])).toEqual([
+      ['attacksurface_probe_http', { url: 'https://app.example.com' }],
+    ]);
   });
 
   it('treats versionless software as an info-level identify-first item, not a CVE lookup', async () => {
     const result = await run({
       findings: { hosts: [{ host: 'x.example.com', technologies: [{ name: 'Apache' }] }] },
     });
-    expect(result.nextToolSuggestions.some((s) => s.server === 'nist-nvd-mcp-server')).toBe(false);
+    expect(result.nextToolSuggestions.map((s) => [s.toolName, s.args])).toEqual([
+      ['attacksurface_probe_http', { url: 'https://x.example.com' }],
+    ]);
     expect(result.priorities.some((p) => p.severity === 'info' && /Apache/.test(p.finding))).toBe(
       true,
     );
@@ -48,9 +52,9 @@ describe('attacksurface_recon_guidance', () => {
     const result = await run({
       findings: { hosts: [{ host: 'bare.example.com', addresses: ['93.184.216.34'] }] },
     });
-    expect(
-      result.nextToolSuggestions.some((s) => s.tool === 'attacksurface_inspect_tls' && !s.server),
-    ).toBe(true);
+    expect(result.nextToolSuggestions.some((s) => s.toolName === 'attacksurface_inspect_tls')).toBe(
+      true,
+    );
   });
 
   it('returns an info baseline when there are no high-signal findings', async () => {
@@ -71,8 +75,8 @@ describe('attacksurface_recon_guidance', () => {
     const text = reconGuidanceTool.format?.(result as never)?.[0];
     expect(text?.type).toBe('text');
     if (text?.type === 'text') {
-      expect(text.text).toContain('nist-nvd-mcp-server');
-      expect(text.text).toContain('Priorities');
+      expect(text.text).toContain('nginx 1.18.0');
+      expect(text.text).toContain('advisories');
     }
   });
 });
