@@ -9,13 +9,13 @@
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
 | `attacksurface_map_domain` | Flagship workflow. Maps a domain's external surface end to end: CT-log subdomain discovery → DNS resolution of each candidate → TLS posture + HTTP headers/tech for live hosts → optional Shodan host enrichment. Returns a structured surface map (subdomains, live hosts, per-host posture, registration) with a `depth` control. | `domain`, `depth` (`quick`\|`standard`\|`thorough`), `includeRegistration` | `readOnlyHint: true`, `openWorldHint: true` |
-| `attacksurface_enumerate_subdomains` | Passive subdomain discovery from Certificate Transparency logs, with DNS resolution to mark which are live. crt.sh primary, Certspotter fallback, TLS SAN list as a third source. No DNS brute-forcing. | `domain`, `includeUnresolved`, `sources` | `readOnlyHint: true`, `openWorldHint: true` |
+| `attacksurface_enumerate_subdomains` | Passive CT discovery with bounded DNS candidate pages, provenance and source completeness. No DNS brute-forcing. | `domain`, `includeUnresolved`, `sources`, `offset`, `limit` | `readOnlyHint: true`, `openWorldHint: true` |
 | `attacksurface_resolve_dns` | Resolve and enumerate DNS records (A/AAAA/MX/NS/TXT/CAA/CNAME) for one or more hosts across multiple public resolvers, plus optional reverse DNS (PTR) for resolved IPs. Reports per-resolver values to surface propagation gaps. | `hosts[]`, `recordTypes[]`, `resolvers[]`, `reverse` | `readOnlyHint: true`, `openWorldHint: true`, `idempotentHint: true` |
 | `attacksurface_inspect_tls` | Inspect TLS/SSL posture for one or more hosts via a real read-only handshake: negotiated protocol + cipher, leaf certificate and chain depth, SANs, validity window, days-to-expiry, issuer, and validation status. Unparseable bounds retain raw values with findings; unknown expiry is null. Inspects invalid/expired/self-signed certs without failing. | `hosts[]`, `port`, `timeoutMs` | `readOnlyHint: true`, `openWorldHint: true`, `idempotentHint: true` |
 | `attacksurface_probe_http` | Passive HTTP(S) probe of a URL: a single GET, following redirects. Returns status, the redirect chain, response headers, a security-header audit (HSTS/CSP/X-Frame-Options/cookie flags/CORS reflection), and a technology fingerprint (server, framework, CDN, WAF, CMS) from headers and lightweight body markers. One request per host — no path traversal, no parameter injection, no multi-method probing. | `url`, `userAgent`, `timeoutMs` | `readOnlyHint: true`, `openWorldHint: true` |
 | `attacksurface_lookup_registration` | Registration and ownership lookup via RDAP (JSON; WHOIS fallback for TLDs without RDAP). Accepts a domain (registrar, status, created/expiry/updated events, nameservers, DNSSEC) or an IP/CIDR (netblock, allocation, origin ASN, country). | `target`, `type` (`auto`\|`domain`\|`ip`) | `readOnlyHint: true`, `openWorldHint: true` |
-| `attacksurface_lookup_host` | Infrastructure intelligence for a single IP or a faceted internet-wide search, powered by Shodan. Single-host lookup returns open ports, service banners, software versions, hostnames, ASN, and geo; faceted search (`mode: search`) may consume query credits. **Requires `SHODAN_API_KEY`** — fails with a typed `source_unavailable` error when unset, and the rest of the server still works. | `target`, `mode` (`host`\|`search`), `facets[]` | `readOnlyHint: true`, `openWorldHint: true` |
-| `attacksurface_recon_guidance` | Instruction tool. Given the findings gathered so far (passed in from prior tool calls), returns a prioritized, **defensive** review plan as markdown plus pre-filled follow-up tool calls — which hosts to inspect next, which expiring certs to flag, which software versions warrant a CVE lookup against an external NVD server. Read-only; no writes, no external calls. | `findings`, `topic` (`triage`\|`posture`\|`coverage`) | `readOnlyHint: true`, `openWorldHint: false` |
+| `attacksurface_lookup_host` | Shodan single-IP intelligence or one explicitly requested 100-match search page. Later search pages are opt-in and may consume query credits. Requires `SHODAN_API_KEY`; otherwise returns `source_unavailable`. | `target`, `mode` (`host`\|`search`), `facets[]`, `page` | `readOnlyHint: true`, `openWorldHint: true` |
+| `attacksurface_recon_guidance` | Offline defensive synthesis: topic/coverage summary, typed priority actions and executable local follow-up calls, with independent bounded pages. | `findings`, `topic` (`triage`\|`posture`\|`coverage`), `priorityOffset`, `suggestionOffset`, `limit` | `readOnlyHint: true`, `openWorldHint: false` |
 
 **8 tools.** Seven keyless-core (1–6, 8); one optional-key (7, Shodan).
 
@@ -39,7 +39,7 @@ It is a **multi-source aggregation server**: the tool surface is organized aroun
 
 **Core capabilities are keyless and passive.** CT-log subdomain enumeration, DNS resolution/enumeration, reverse DNS, TLS/certificate inspection, HTTP header + tech fingerprinting, and RDAP/WHOIS lookups all work with **zero API keys**. A single optional key (Shodan) deepens host/network intelligence; the server detects its absence and returns a typed `source_unavailable` error from the one tool that needs it, leaving every other tool fully functional.
 
-This composes with the rest of the cyanheads fleet: detected software versions chain to `nist-nvd-mcp-server` (CVE context) and `osv-advisory-mcp-server`; discovered IPs/domains chain to `threat-intel-mcp-server` for indicator enrichment. `attacksurface_recon_guidance` pre-fills those cross-server follow-ups.
+Detected software versions retain host/product/version advisory-check instructions in guidance priorities and rendered text. Executable suggestions use the local `{toolName, reason, args}` contract; they never assume another server is installed.
 
 ## Requirements
 
@@ -73,7 +73,7 @@ The `ct` and `shodan` services carry retry/backoff and parse-classification conf
 | `CERTSPOTTER_API_KEY` | No | Raises Certspotter rate limits for the CT fallback. Absent → free unauthenticated tier (rate-limited but functional). |
 | `ATTACKSURFACE_DEFAULT_RESOLVERS` | No | Comma-separated resolver IPs for `resolve_dns` (default `8.8.8.8,1.1.1.1,9.9.9.9`). |
 | `ATTACKSURFACE_HTTP_USER_AGENT` | No | Default UA for `probe_http` (default identifies the server honestly; overridable per call). |
-| `ATTACKSURFACE_MAX_SUBDOMAINS` | No | Cap on subdomains resolved during a `map_domain` run (default 200) — bounds fan-out cost. |
+| `ATTACKSURFACE_MAX_SUBDOMAINS` | No | Map/snapshot resolution cap (default 200); enumeration also caps each page at 50 candidates. |
 | `ATTACKSURFACE_RDAP_BOOTSTRAP_URL` | No | RDAP bootstrap base (default `https://rdap.org`); override for a private/mirrored RDAP. |
 
 All in `src/config/server-config.ts` as a separate Zod schema via `parseEnvConfig`. `z.stringbool()` for any boolean flags. No required vars — the server boots and delivers core value with an empty environment.
@@ -87,7 +87,7 @@ All in `src/config/server-config.ts` as a separate Zod schema via `parseEnvConfi
 5. **Read-only tools, keyless first** — `resolve_dns`, `inspect_tls`, `probe_http`, `lookup_registration`, `enumerate_subdomains`. Each maps to the services above; soft per-target errors.
 6. **`shodan-service` + `lookup_host`** — the one key-gated path; `source_unavailable` contract when key absent.
 7. **`map_domain`** — the flagship workflow that composes all services (fan-out via `Promise.allSettled`, `depth` gating, opportunistic Shodan).
-8. **`recon_guidance`** instruction tool — pure synthesis over passed-in findings; `nextToolSuggestions` pre-filled (incl. cross-server NVD/OSV/threat-intel calls).
+8. **`recon_guidance`** instruction tool — offline synthesis, topic selection and bounded priority/suggestion pages; `nextToolSuggestions` prefills only local registered tools.
 9. **`attacksurface://surface/{domain}` resource** — thin wrapper over `map_domain` at `standard` depth.
 10. **Tests + field-test + security-pass** — sparse-payload cases (CT down, RDAP `country: null`, invalid cert), SSRF rejection cases, fuzz.
 
@@ -112,6 +112,12 @@ Each step is independently testable.
 ## Design Decisions
 
 ### Discovery coverage and failures
+
+- Enumeration preselects a sorted stateless candidate prefix before DNS: `limit` defaults to 50 and clamps to `min(50, ATTACKSURFACE_MAX_SUBDOMAINS)`. Candidate offsets advance only past delivered/filtered records; examined but undelivered suffixes are re-resolved. Empty filtered pages advance. Counts distinguish discovered, examined, returned and remaining records; continuation preserves sources/filter and discloses that fresh CT data can shift offsets.
+- Guidance selects topics before stable severity ordering and independent priority/suggestion offset pages. `triage` includes all findings; `posture` selects TLS/header hardening; `coverage` selects inspection/version evidence and observed-port review. Ports are informational exposure, never vulnerability evidence; SSH/RDP never trigger a TLS probe. Local calls share `{toolName, reason, args}` with map/coverage retrieval, so callers can validate them against registered input schemas.
+- Enumeration and guidance target 24,000 serialized bytes across structured output and complete content, including plans, instructions, JSON keys and escaping. One complete oversized record is returned with an explicit exception so cursors always progress. Guidance resubmits original findings/topic; exhausted collections retain their total as offset instead of resetting. `plan` summarizes topic and page coverage; typed priorities retain detailed findings/actions and render once in text, avoiding duplicated actions on either surface.
+- Map handoff derives TLS/expiry/chain trust, missing raw audited header names, versioned products and observed ports directly from service records. Unknown/null evidence is omitted; false/zero survives. The eligible prefix includes at most 50 hosts and targets 24,000 incremental bytes across both surfaces, with explicit oversized-host disclosure and exact omitted hostnames. The map's discovery/detail coverage and unpaged map output stay independent.
+- DNS/TLS accept 1–1000 hosts but process the first 50, validating the full list before I/O. Both surfaces retain `processedCount` and exact `remainingHosts` beside ordinary and per-host-error results. Shodan search fetches one explicit positive-integer page (default 1), preserves query/facets in opt-in continuation and terminates empty pages even when the provider total is stale; host mode ignores paging.
 
 - crt.sh returns newline-delimited `name_value`; Certspotter returns `dns_names` arrays. Missing optional names are empty evidence; malformed present fields are source failures. Names are scoped, normalized and deduplicated with provenance.
 - Certspotter traverses `after=<last id>` until an empty page, with a five-page ceiling and one 15-second budget across fetch, body and retries. Prior pages survive failure; completeness records exhaustion, cap, cursor failure or deadline. These bounds keep unauthenticated discovery predictable rather than claiming exhaustive CT coverage.

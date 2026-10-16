@@ -5,7 +5,7 @@
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
-**Zod:** ^4.6.5
+**Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -51,11 +51,15 @@ export const inspectTlsTool = tool('attacksurface_inspect_tls', {
     'Inspect TLS/SSL posture for one or more hosts via a real read-only handshake … SSRF-guarded; per-host failures degrade to a per-host error. Use only on assets you own or are authorized to assess.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
   input: z.object({
-    hosts: z.array(z.string().describe('Hostname or IP to inspect.')).min(1).max(50)
-      .describe('Hosts to inspect (1–50).'),
+    hosts: z.array(z.string().describe('Hostname or IP to inspect.')).min(1).max(1000)
+      .describe('Hosts to inspect (1–1000); process the first 50 and resubmit remainingHosts.'),
     port: z.number().int().min(1).max(65535).default(443).describe('TLS port to connect to.'),
   }),
-  output: z.object({ results: z.array(/* TlsResultSchema */ z.unknown()).describe('Per-host results.') }),
+  output: z.object({
+    results: z.array(/* TlsResultSchema */ z.unknown()).describe('Per-host results.'),
+    processedCount: z.number().describe('Number of hosts processed, at most 50.'),
+    remainingHosts: z.array(z.string()).describe('Exact unprocessed suffix; resubmit to continue.'),
+  }),
   // Typed contract: `ctx.fail('invalid_host', …)` is type-checked against this reason union;
   // baseline codes (Timeout, ServiceUnavailable, …) bubble freely without declaring.
   errors: [
@@ -73,14 +77,14 @@ export const inspectTlsTool = tool('attacksurface_inspect_tls', {
       }
     }
     // The service SSRF-checks each host before connecting; one failing host → per-host error, not a throw.
-    const results = await getTlsService().inspectHosts(input.hosts, input.port);
-    return { results };
+    const results = await getTlsService().inspectHosts(input.hosts.slice(0, 50), input.port);
+    return { results, processedCount: Math.min(input.hosts.length, 50), remainingHosts: input.hosts.slice(50) };
   },
 
   // format() populates content[] — the markdown twin of structuredContent. Different clients read
   // different surfaces (Claude Code → structuredContent, Claude Desktop → content[]); both must
   // carry the same data. Enforced at lint time: every output field must appear in the rendered text.
-  format: (result) => [{ type: 'text', text: renderTlsResults(result.results) }],
+  format: (result) => [{ type: 'text', text: `Processed ${result.processedCount}; remainingHosts=${JSON.stringify(result.remainingHosts)}\n${renderTlsResults(result.results)}` }],
 });
 ```
 
@@ -123,7 +127,7 @@ const ServerConfigSchema = z.object({
   certspotterApiKey: z.string().optional().describe('Certspotter API key for higher CT-fallback rate limits.'),
   defaultResolvers: z.string().default('8.8.8.8,1.1.1.1,9.9.9.9').describe('Comma-separated default DNS resolver IPs.'),
   httpUserAgent: z.string().default('attack-surface-mcp-server/passive-recon (+…)').describe('Default User-Agent for HTTP probes.'),
-  maxSubdomains: z.coerce.number().int().min(1).max(5000).default(200).describe('Max subdomains resolved per map_domain run.'),
+  maxSubdomains: z.coerce.number().int().min(1).max(5000).default(200).describe('Map/snapshot resolution cap; enumeration resolves min(this value, 50, requested limit) candidates per page.'),
   rdapBootstrapUrl: z.string().url().default('https://rdap.org').describe('RDAP bootstrap base URL.'),
 });
 

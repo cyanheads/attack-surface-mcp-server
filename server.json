@@ -44,7 +44,7 @@
         },
         {
           "name": "ATTACKSURFACE_MAX_SUBDOMAINS",
-          "description": "Cap on subdomains resolved during a map_domain run.",
+          "description": "Map/snapshot resolution cap; enumeration also caps each page at 50 candidates.",
           "format": "string",
           "isRequired": false,
           "default": "200"
