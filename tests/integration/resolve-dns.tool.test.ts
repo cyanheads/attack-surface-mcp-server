@@ -76,6 +76,22 @@ describe('attacksurface_resolve_dns', () => {
     vi.unstubAllEnvs();
   });
 
+  it('retains operational failures in input order', async () => {
+    dnsBoundary.query.mockRejectedValue(new Error('resolver unavailable'));
+    const result = await runToolContract(resolveDnsTool, {
+      hosts: ['first.example.com', 'second.example.com'],
+      recordTypes: ['A'],
+      resolvers: ['8.8.8.8'],
+    });
+    expect(result.structuredContent).toMatchObject({
+      results: [
+        { host: 'first.example.com', hostError: 'resolver unavailable' },
+        { host: 'second.example.com', hostError: 'resolver unavailable' },
+      ],
+    });
+    expect(JSON.stringify(result.content)).toContain('resolver unavailable');
+  });
+
   it('returns schema-valid records, resolver details, reverse PTRs, and complete format output', async () => {
     dnsBoundary.query.mockImplementation(async (type) => {
       if (type === 'A') return ['93.184.216.34'];
@@ -97,6 +113,8 @@ describe('attacksurface_resolve_dns', () => {
 
     expect(result).toEqual(expect.schemaMatching(resolveDnsTool.output));
     expect(result).toEqual({
+      processedCount: 1,
+      remainingHosts: [],
       results: [
         {
           host: 'example.com',
@@ -138,13 +156,49 @@ describe('attacksurface_resolve_dns', () => {
   it('enforces host-count and record-type schema boundaries', () => {
     expect(resolveDnsTool.input.safeParse({ hosts: [] }).success).toBe(false);
     expect(
-      resolveDnsTool.input.safeParse({ hosts: Array.from({ length: 51 }, () => 'example.com') })
+      resolveDnsTool.input.safeParse({ hosts: Array.from({ length: 1001 }, () => 'example.com') })
         .success,
     ).toBe(false);
     expect(resolveDnsTool.input.safeParse({ hosts: ['example.com'] }).success).toBe(true);
     expect(
       resolveDnsTool.input.safeParse({ hosts: ['example.com'], recordTypes: ['PTR'] }).success,
     ).toBe(false);
+  });
+
+  it.each([1, 50, 51, 1000])(
+    'bounds DNS work and retains the exact remainder for %i hosts',
+    async (count) => {
+      const hosts = Array.from({ length: count }, (_, i) => `h${i}.example.com`);
+      const result = await runToolContract(resolveDnsTool, {
+        hosts,
+        recordTypes: ['A'],
+        resolvers: ['8.8.8.8'],
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        processedCount: Math.min(count, 50),
+        remainingHosts: hosts.slice(50),
+      });
+      expect(dnsBoundary.query).toHaveBeenCalledTimes(Math.min(count, 50));
+      const output = resolveDnsTool.output.parse(result.structuredContent);
+      expect(output.results.map((r) => r.host)).toEqual(hosts.slice(0, 50));
+      const text = result.content
+        .filter((b) => b.type === 'text')
+        .map((b) => b.text)
+        .join('\n');
+      expect(text).toContain(
+        `Processed ${Math.min(count, 50)} hosts; ${hosts.slice(50).length} remaining.`,
+      );
+      for (const host of hosts.slice(50)) expect(text).toContain(`\`${host}\``);
+    },
+  );
+
+  it('validates malformed remainder before any DNS work', async () => {
+    const result = await runToolContract(resolveDnsTool, {
+      hosts: [...Array.from({ length: 50 }, () => 'example.com'), 'https://bad.example.com'],
+    });
+    expect(result.structuredContent).toMatchObject({ error: { data: { reason: 'invalid_host' } } });
+    expect(dnsBoundary.query).not.toHaveBeenCalled();
   });
 
   it('returns a shaped per-host SSRF error without failing other results', async () => {

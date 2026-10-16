@@ -12,6 +12,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getShodanService } from '@/services/shodan/shodan-service.js';
 import { literalText } from '@/utils/literal-text.js';
+import { NextCallSchema } from '@/utils/next-call.js';
 
 const ServiceBannerSchema = z
   .object({
@@ -56,7 +57,14 @@ const FacetBucketSchema = z
 
 const SearchResultSchema = z.object({
   total: z.number().describe('Total matches reported by Shodan.'),
-  matches: z.array(SearchMatchSchema).describe('Returned matches (first page).'),
+  matches: z.array(SearchMatchSchema).describe('Returned matches from this page.'),
+  page: z.number().describe('Requested search page.'),
+  pageSize: z.literal(100).describe('Shodan search page size.'),
+  hasMore: z.boolean().describe('Whether another page is available.'),
+  nextPage: z.number().nullable().describe('Next search page, or null when exhausted.'),
+  continuation: NextCallSchema.nullable().describe(
+    'Opt-in next-page call, or null when exhausted.',
+  ),
   facets: z
     .record(z.string(), z.array(FacetBucketSchema))
     .describe('Facet aggregations: facet name → value/count buckets.'),
@@ -82,6 +90,14 @@ export const lookupHostTool = tool('attacksurface_lookup_host', {
       .array(z.string())
       .optional()
       .describe('Facet fields for mode "search" (e.g. ["port", "org", "country"]).'),
+    page: z
+      .number()
+      .int()
+      .positive()
+      .default(1)
+      .describe(
+        'Search page (100 matches per page); ignored in host mode. Each call fetches one page and may consume credits.',
+      ),
   }),
   output: z.object({
     mode: z.enum(['host', 'search']).describe('The mode that was executed.'),
@@ -126,8 +142,33 @@ export const lookupHostTool = tool('attacksurface_lookup_host', {
     }
 
     if (input.mode === 'search') {
-      const search = await shodan.search(input.target, input.facets ?? [], ctx);
-      return { mode: 'search' as const, search };
+      const search = await shodan.search(input.target, input.facets ?? [], ctx, input.page);
+      const hasMore = search.matches.length > 0 && input.page * 100 < search.total;
+      const nextPage = hasMore ? input.page + 1 : null;
+      const continuation =
+        nextPage === null
+          ? null
+          : {
+              toolName: 'attacksurface_lookup_host',
+              reason: 'Fetch the next Shodan search page; this may consume query credits.',
+              args: {
+                target: input.target,
+                mode: 'search',
+                ...(input.facets ? { facets: input.facets } : {}),
+                page: nextPage,
+              },
+            };
+      return {
+        mode: 'search' as const,
+        search: {
+          ...search,
+          page: input.page,
+          pageSize: 100 as const,
+          hasMore,
+          nextPage,
+          continuation,
+        },
+      };
     }
 
     try {
@@ -166,6 +207,9 @@ export const lookupHostTool = tool('attacksurface_lookup_host', {
     const sr = result.search;
     if (sr) {
       lines.push(`### Search — ${sr.total} total match(es)`);
+      lines.push(
+        `Search page ${sr.page}; pageSize=${sr.pageSize}; hasMore=${sr.hasMore}; nextPage=${sr.nextPage ?? 'none'}; continuation=${literalText(JSON.stringify(sr.continuation))}`,
+      );
       for (const m of sr.matches) {
         lines.push(
           `- ${literalText(`${m.ip}:${m.port}`)} — ${literalText(m.product ?? 'unknown product')} · ${literalText(m.org ?? 'unknown org')} · ${literalText(m.country ?? 'unknown country')}`,

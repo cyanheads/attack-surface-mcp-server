@@ -57,7 +57,7 @@ export interface ShodanSearchMatch {
 export interface ShodanSearchResult {
   /** Facet aggregations: facet name → [{value, count}]. */
   facets: Record<string, Array<{ value: string; count: number }>>;
-  /** Returned matches (page 1). */
+  /** Returned matches from the explicitly requested page. */
   matches: ShodanSearchMatch[];
   /** Total matches reported by Shodan. */
   total: number;

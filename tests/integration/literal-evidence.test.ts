@@ -97,6 +97,8 @@ describe('literal evidence formatter wiring', () => {
       checkedAt: 'now',
     };
     const result = inspectTlsTool.output.parse({
+      processedCount: 2,
+      remainingHosts: [],
       results: [record, { ...record, host: 'second.example.com' }],
     });
     const before = structuredClone(result);
@@ -119,6 +121,8 @@ describe('literal evidence formatter wiring', () => {
     const canonical = multiline('canonical-multiline');
     const resolver = multiline('resolver-multiline');
     const result = resolveDnsTool.output.parse({
+      processedCount: 1,
+      remainingHosts: [],
       results: [
         {
           host: 'example.com',
@@ -176,6 +180,11 @@ describe('literal evidence formatter wiring', () => {
       lookupHostTool.output.parse({
         mode: 'search',
         search: {
+          page: 1,
+          pageSize: 100,
+          hasMore: false,
+          nextPage: null,
+          continuation: null,
           total: 1,
           matches: [{ ip: '8.8.8.8', port: 443, product: singles[3], org: singles[4] }],
           facets: { [singles[5] ?? '']: [{ value: singles[6], count: 1 }] },

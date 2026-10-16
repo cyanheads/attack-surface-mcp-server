@@ -222,7 +222,9 @@ describe('TlsService', () => {
       'Certificate identity could not be verified: Invalid subject alternative name string.',
     );
     expect(vi.getTimerCount()).toBe(0);
-    expect({ results: [result] }).toEqual(expect.schemaMatching(inspectTlsTool.output));
+    expect({ results: [result], processedCount: 1, remainingHosts: [] }).toEqual(
+      expect.schemaMatching(inspectTlsTool.output),
+    );
   });
 
   it('preserves malformed certificate dates as unknown instead of returning NaN', async () => {
@@ -246,7 +248,9 @@ describe('TlsService', () => {
       'Certificate not-after date could not be parsed; expiry is unknown.',
     );
     expect(result?.handshakeError).toBeNull();
-    expect({ results: [result] }).toEqual(expect.schemaMatching(inspectTlsTool.output));
+    expect({ results: [result], processedCount: 1, remainingHosts: [] }).toEqual(
+      expect.schemaMatching(inspectTlsTool.output),
+    );
   });
 
   it.each(['1.1.1.1', '2606:4700:4700::1111', '::ffff:1.1.1.1'])(
@@ -297,7 +301,9 @@ describe('TlsService', () => {
     const [result] = await new TlsService().inspectHosts(['secure.example.com']);
     expect(result?.certificate?.daysUntilExpiry).toBe(expectedDays);
     expect(result?.handshakeError).toBeNull();
-    expect({ results: [result] }).toEqual(expect.schemaMatching(inspectTlsTool.output));
+    expect({ results: [result], processedCount: 1, remainingHosts: [] }).toEqual(
+      expect.schemaMatching(inspectTlsTool.output),
+    );
     expect(JSON.parse(JSON.stringify(result))).toEqual(result);
     expect(result?.certificate?.subjectAltNames).toContain('www.example.com');
     expect(tlsBoundary.connect).toHaveBeenCalledWith(

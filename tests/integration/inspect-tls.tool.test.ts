@@ -123,7 +123,7 @@ describe('attacksurface_inspect_tls', () => {
   it('enforces host-count, port, and timeout schema boundaries', () => {
     expect(inspectTlsTool.input.safeParse({ hosts: [] }).success).toBe(false);
     expect(
-      inspectTlsTool.input.safeParse({ hosts: Array.from({ length: 51 }, () => 'example.com') })
+      inspectTlsTool.input.safeParse({ hosts: Array.from({ length: 1001 }, () => 'example.com') })
         .success,
     ).toBe(false);
     expect(inspectTlsTool.input.safeParse({ hosts: ['example.com'], port: 0 }).success).toBe(false);
@@ -143,6 +143,45 @@ describe('attacksurface_inspect_tls', () => {
       inspectTlsTool.input.safeParse({ hosts: ['example.com'], port: 65_535, timeoutMs: 30_000 })
         .success,
     ).toBe(true);
+  });
+
+  it.each([1, 50, 51, 1000])(
+    'bounds TLS work and retains the exact remainder for %i hosts',
+    async (count) => {
+      const hosts = Array.from({ length: count }, (_, i) => `h${i}.example.com`);
+      tlsBoundary.scenarios.push(
+        ...Array.from({ length: Math.min(count, 50) }, () => ({
+          mode: 'error' as const,
+          error: new Error('closed'),
+        })),
+      );
+      const result = await runToolContract(inspectTlsTool, { hosts });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        processedCount: Math.min(count, 50),
+        remainingHosts: hosts.slice(50),
+      });
+      expect(tlsBoundary.connect).toHaveBeenCalledTimes(Math.min(count, 50));
+      const output = inspectTlsTool.output.parse(result.structuredContent);
+      expect(output.results.map((r) => r.host)).toEqual(hosts.slice(0, 50));
+      const text = result.content
+        .filter((b) => b.type === 'text')
+        .map((b) => b.text)
+        .join('\n');
+      expect(text).toContain(
+        `Processed ${Math.min(count, 50)} hosts; ${hosts.slice(50).length} remaining.`,
+      );
+      for (const host of hosts.slice(50)) expect(text).toContain(`\`${host}\``);
+      expect(JSON.stringify(result.content)).toContain('No host completed');
+    },
+  );
+
+  it('validates malformed remainder before any handshake', async () => {
+    const result = await runToolContract(inspectTlsTool, {
+      hosts: [...Array.from({ length: 50 }, () => 'example.com'), 'https://bad.example.com'],
+    });
+    expect(result.structuredContent).toMatchObject({ error: { data: { reason: 'invalid_host' } } });
+    expect(tlsBoundary.connect).not.toHaveBeenCalled();
   });
 
   it.each(['1.1.1.1', '2606:4700:4700::1111', 'secure.example.com'])(

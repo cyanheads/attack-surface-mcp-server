@@ -75,8 +75,8 @@ export const resolveDnsTool = tool('attacksurface_resolve_dns', {
     hosts: z
       .array(z.string().describe('Hostname to resolve (e.g. "example.com", "www.example.com").'))
       .min(1)
-      .max(50)
-      .describe('Hosts to resolve (1–50).'),
+      .max(1000)
+      .describe('Hosts to resolve (1–1000); process the first 50 and resubmit remainingHosts.'),
     recordTypes: z
       .array(RecordTypeEnum)
       .optional()
@@ -95,6 +95,8 @@ export const resolveDnsTool = tool('attacksurface_resolve_dns', {
   output: z.object({
     results: z.array(HostResultSchema).describe('Per-host DNS results.'),
     resolversUsed: z.array(z.string()).describe('Resolver IPs actually queried.'),
+    processedCount: z.number().describe('Number of hosts processed, at most 50.'),
+    remainingHosts: z.array(z.string()).describe('Exact unprocessed suffix; resubmit to continue.'),
   }),
   enrichment: {
     notice: z.string().optional().describe('Guidance when queries failed or no host resolved.'),
@@ -160,7 +162,7 @@ export const resolveDnsTool = tool('attacksurface_resolve_dns', {
       input.recordTypes && input.recordTypes.length > 0 ? input.recordTypes : ALL_RECORD_TYPES;
 
     const results = await getDnsService().resolveHosts(
-      input.hosts,
+      input.hosts.slice(0, 50),
       types,
       resolvers,
       input.reverse,
@@ -177,11 +179,19 @@ export const resolveDnsTool = tool('attacksurface_resolve_dns', {
       );
     }
 
-    return { results, resolversUsed: resolvers };
+    return {
+      results,
+      resolversUsed: resolvers,
+      processedCount: Math.min(input.hosts.length, 50),
+      remainingHosts: input.hosts.slice(50),
+    };
   },
 
   format: (result) => {
     const lines: string[] = [];
+    lines.push(
+      `Processed ${result.processedCount} hosts; ${result.remainingHosts.length} remaining. Resubmit remainingHosts to continue: ${result.remainingHosts.map(literalText).join(', ') || 'none'}`,
+    );
     for (const r of result.results) {
       lines.push(`## ${literalText(r.host)}`);
       lines.push(`**Resolved:** ${r.resolved ? 'yes' : 'no'}`);

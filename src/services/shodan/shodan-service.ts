@@ -92,9 +92,14 @@ export class ShodanService {
   }
 
   /** Faceted internet-wide search (may consume query credits). */
-  async search(query: string, facets: string[], ctx: Context): Promise<ShodanSearchResult> {
+  async search(
+    query: string,
+    facets: string[],
+    ctx: Context,
+    page = 1,
+  ): Promise<ShodanSearchResult> {
     const key = this.requireKey();
-    const params = new URLSearchParams({ key, query });
+    const params = new URLSearchParams({ key, query, page: String(page) });
     if (facets.length > 0) params.set('facets', facets.join(','));
     const url = `${BASE_URL}/shodan/host/search?${params.toString()}`;
     const raw = await this.fetchJson<RawShodanSearch>(url, ctx, 'shodanService.search');

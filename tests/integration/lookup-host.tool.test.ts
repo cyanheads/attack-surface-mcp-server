@@ -38,6 +38,56 @@ describe('attacksurface_lookup_host', () => {
     vi.useRealTimers();
   });
 
+  it('walks explicit search pages once per call and stops at empty or past-end pages', async () => {
+    fetchMock.mockImplementation(async (url) => {
+      const page = Number(new URL(String(url)).searchParams.get('page') ?? 1);
+      return Response.json({
+        total: 150,
+        matches: Array.from({ length: page === 1 ? 100 : page === 2 ? 50 : 0 }, (_, i) => ({
+          ip_str: `8.8.8.${i}`,
+          port: 443,
+        })),
+      });
+    });
+    const first = await runToolContract(lookupHostTool, {
+      target: 'org:owned',
+      mode: 'search',
+      facets: ['port'],
+    });
+    expect(first.structuredContent).toMatchObject({
+      search: {
+        page: 1,
+        pageSize: 100,
+        hasMore: true,
+        nextPage: 2,
+        continuation: {
+          toolName: 'attacksurface_lookup_host',
+          args: { target: 'org:owned', mode: 'search', facets: ['port'], page: 2 },
+        },
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    for (const page of [2, 3, 99]) {
+      const result = await runToolContract(lookupHostTool, {
+        target: 'org:owned',
+        mode: 'search',
+        page,
+      });
+      expect(result.structuredContent).toMatchObject({
+        search: { page, hasMore: false, nextPage: null, continuation: null },
+      });
+      expect(JSON.stringify(result.content)).toContain(`page ${page}`);
+      expect(new URL(String(fetchMock.mock.calls.at(-1)?.[0])).searchParams.get('page')).toBe(
+        String(page),
+      );
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    for (const page of [0, -1, 1.5])
+      expect(
+        lookupHostTool.input.safeParse({ target: 'query', mode: 'search', page }).success,
+      ).toBe(false);
+  });
+
   it('returns the complete host-mode output and renders optional fields', async () => {
     fetchMock.mockResolvedValue(
       Response.json({
@@ -127,6 +177,11 @@ describe('attacksurface_lookup_host', () => {
     expect(result).toEqual({
       mode: 'search',
       search: {
+        page: 1,
+        pageSize: 100,
+        hasMore: false,
+        nextPage: null,
+        continuation: null,
         total: 1,
         matches: [
           {
@@ -178,7 +233,16 @@ describe('attacksurface_lookup_host', () => {
     expect(result.isError).not.toBe(true);
     expect(result.structuredContent).toEqual({
       mode: 'search',
-      search: { total: 0, matches: [], facets: {} },
+      search: {
+        total: 0,
+        matches: [],
+        facets: {},
+        page: 1,
+        pageSize: 100,
+        hasMore: false,
+        nextPage: null,
+        continuation: null,
+      },
     });
     expect(JSON.stringify(result.content)).toContain('0 total match(es)');
     expect(new URL(String(fetchMock.mock.calls[0]?.[0])).searchParams.get('query')).toBe(target);

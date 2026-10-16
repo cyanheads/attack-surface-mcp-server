@@ -86,8 +86,8 @@ export const inspectTlsTool = tool('attacksurface_inspect_tls', {
     hosts: z
       .array(z.string().describe('Hostname or IP to inspect (e.g. "example.com").'))
       .min(1)
-      .max(50)
-      .describe('Hosts to inspect (1–50).'),
+      .max(1000)
+      .describe('Hosts to inspect (1–1000); process the first 50 and resubmit remainingHosts.'),
     port: z.number().int().min(1).max(65535).default(443).describe('TLS port to connect to.'),
     timeoutMs: z
       .number()
@@ -99,6 +99,8 @@ export const inspectTlsTool = tool('attacksurface_inspect_tls', {
   }),
   output: z.object({
     results: z.array(TlsResultSchema).describe('Per-host TLS inspection results.'),
+    processedCount: z.number().describe('Number of hosts processed, at most 50.'),
+    remainingHosts: z.array(z.string()).describe('Exact unprocessed suffix; resubmit to continue.'),
   }),
   enrichment: {
     notice: z.string().optional().describe('Guidance when every host failed to handshake.'),
@@ -121,7 +123,11 @@ export const inspectTlsTool = tool('attacksurface_inspect_tls', {
       }
     }
 
-    const results = await getTlsService().inspectHosts(input.hosts, input.port, input.timeoutMs);
+    const results = await getTlsService().inspectHosts(
+      input.hosts.slice(0, 50),
+      input.port,
+      input.timeoutMs,
+    );
 
     if (results.every((r) => r.handshakeError !== null)) {
       ctx.enrich.notice(
@@ -129,11 +135,18 @@ export const inspectTlsTool = tool('attacksurface_inspect_tls', {
       );
     }
 
-    return { results };
+    return {
+      results,
+      processedCount: Math.min(input.hosts.length, 50),
+      remainingHosts: input.hosts.slice(50),
+    };
   },
 
   format: (result) => {
     const lines: string[] = [];
+    lines.push(
+      `Processed ${result.processedCount} hosts; ${result.remainingHosts.length} remaining. Resubmit remainingHosts to continue: ${result.remainingHosts.map(literalText).join(', ') || 'none'}`,
+    );
     for (const r of result.results) {
       lines.push(`## ${literalText(`${r.host}:${r.port}`)}`);
       lines.push(`**Error:** ${literalText(r.handshakeError ?? 'none')}`);
