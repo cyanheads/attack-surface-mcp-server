@@ -28,7 +28,7 @@
 
 ## Overview
 
-Passive external attack-surface mapping (EASM) over Certificate Transparency logs, DNS, TLS, HTTP, and RDAP/WHOIS registries, with optional Shodan host intelligence. Discover subdomains, resolve DNS records, and inspect TLS and HTTP security posture across a domain's live hosts. Runs as a stdio process or a local Streamable HTTP server.
+Passive external attack-surface mapping (EASM) over Certificate Transparency logs, DNS, TLS, HTTP, and RDAP/WHOIS registries, with optional Shodan host intelligence. Discover subdomains, resolve DNS records, and inspect TLS and HTTP security posture across a domain's live hosts.
 
 ### Tools
 
@@ -56,79 +56,72 @@ All resource data is also reachable via tools — tool-only clients lose nothing
 ### `attacksurface_map_domain` <sub>tool</sub>
 
 - `depth`: `quick` discovers subdomains and liveness; `standard` adds DNS records, TLS, and HTTP posture; `thorough` adds per-IP Shodan data when a key is present, otherwise a note.
-- Returns a structured surface map and defensive `assessment` of observable facts. Failed sources or unreachable hosts become notes; subdomain resolution is capped by `ATTACKSURFACE_MAX_SUBDOMAINS` (default 200), with truncation disclosed.
-- `includeRegistration` adds RDAP/WHOIS data for the apex at standard or thorough depth.
-- The apex takes the first candidate slot, even at cap 1. `coverage` separates discovered/examined candidates from host detail; `unexamined` and `detailOmitted` name exact omissions. `retrieval` supplies at most three executable examples (`toolName`, `args`, `reason`): DNS/TLS batches of at most 50 hosts and one HTTP URL, with instructions to repeat over the remaining names. These caps bound work, not response bytes.
-- Standard and thorough depth return canonical A/AAAA/CNAME/MX/NS/TXT/CAA records from the first configured resolver, all resolver outcomes and propagation mismatches for examined live hosts. Work is bounded to ten hosts concurrently. `addressStatuses` and per-host `errors` retain blocked targets and partial failures alongside successful data; null posture at quick depth means skipped work.
-- `nextToolSuggestions` uses `{toolName, reason, args}` and prefills one local `attacksurface_recon_guidance` triage call from TLS, missing audited headers, versioned technologies and observed ports. Address-only quick maps have no suggestion. `guidanceCoverage` names eligible/included counts and exact omitted hosts; submit remaining map hosts separately. The handoff includes at most 50 complete hosts and targets 24,000 incremental serialized bytes across both surfaces, with an explicit oversized-host exception. Map results themselves are not paginated.
+- Returns a structured surface map and a defensive `assessment` of observable facts. Failed sources and unreachable hosts become notes, and subdomain resolution is capped by `ATTACKSURFACE_MAX_SUBDOMAINS` (default 200), with truncation disclosed.
+- `includeRegistration` adds RDAP/WHOIS data for the apex at standard or thorough depth. Standard and thorough also return DNS records from the first configured resolver plus propagation mismatches for live hosts; null posture at quick depth means the work was skipped.
+- `coverage` lists what was left unexamined or without host detail (`unexamined`, `detailOmitted`), and `retrieval` gives up to three ready-to-run follow-up calls (DNS/TLS batches of at most 50 hosts, one HTTP URL). `nextToolSuggestions` prefills an `attacksurface_recon_guidance` call for up to 50 hosts, with `guidanceCoverage` naming any omitted.
 
 ---
 
 ### `attacksurface_enumerate_subdomains` <sub>tool</sub>
 
-- Discovers names through crt.sh → Certspotter → the apex TLS certificate SANs, then resolves DNS liveness. `includeUnresolved: false` keeps only live hosts while `filteredAddressErrors` retains operational failures for excluded names.
-- Returns each name's source provenance and per-source status; no DNS brute-forcing or target-resolver probing.
-- `offset` and `limit` (default 50, larger requests clamped) select a sorted candidate prefix before DNS; work is bounded by `min(50, ATTACKSURFACE_MAX_SUBDOMAINS)`. `discoveredCount`, `examinedCount`, `returnedCount`, `remainingCount` and `nextOffset` distinguish attempted work from consumed records. A wholly filtered page still advances. `continuation` preserves domain/sources/filter; CT is re-read, so changes can shift offsets. Pages target 24,000 serialized bytes across structured and complete text output; one complete oversized record is returned with an explicit notice. Examined but undelivered candidates are re-resolved on continuation.
-- crt.sh names come from newline-delimited `name_value`; Certspotter uses `dns_names`. Certspotter follows issuance cursors for at most five pages within one 15-second budget, including retries and body reads. `complete`, `pagesFetched` and `incompleteReason` disclose exhaustion or partial coverage; names from earlier pages survive a later failure. `addressError` distinguishes operational DNS failures from ENODATA/ENOTFOUND absence.
+- Discovers names through crt.sh → Certspotter → the apex TLS certificate SANs, then resolves DNS liveness. `includeUnresolved: false` keeps only live hosts; `filteredAddressErrors` retains DNS failures for excluded names.
+- Returns each name's source provenance and per-source status. `complete`, `pagesFetched`, and `incompleteReason` disclose partial coverage, and `addressError` separates DNS failures from ENODATA/ENOTFOUND absence.
+- `offset` and `limit` (default 50, larger requests clamped) page through candidates, bounded by `min(50, ATTACKSURFACE_MAX_SUBDOMAINS)`. Use `nextOffset` or the prefilled `continuation` for the next page, and `remainingCount` to see what is left. CT logs are re-read per page, so changes can shift offsets.
 
 ---
 
 ### `attacksurface_resolve_dns` <sub>tool</sub>
 
-- Accepts 1–1000 hosts, validates the complete list before I/O, and processes the first 50 in input order. `processedCount` and exact `remainingHosts` appear on both surfaces; resubmit the remainder to continue. Queries A, AAAA, CNAME, MX, NS, TXT, and CAA across public resolvers (default `8.8.8.8`, `1.1.1.1`, `9.9.9.9`); reverse DNS (PTR) is optional.
-- Returns per-resolver answers to expose propagation gaps. Private or loopback resolver IPs produce `blocked_resolver`; an individual host failure becomes a per-host error.
-- Canonical records come from the first configured resolver. Resolver failures (including SERVFAIL) remain in `queryError` and `hostError` alongside any successful records; absent records are error-free.
+- Accepts 1–1000 hosts and processes the first 50 in input order; `processedCount` and `remainingHosts` show what to resubmit. Queries A, AAAA, CNAME, MX, NS, TXT, and CAA across public resolvers (default `8.8.8.8`, `1.1.1.1`, `9.9.9.9`); reverse DNS (PTR) is optional.
+- Returns per-resolver answers to expose propagation gaps, with canonical records from the first configured resolver. Resolver failures (including SERVFAIL) appear in `queryError` and `hostError` next to any successful records.
+- Private or loopback resolver IPs produce `blocked_resolver`; an individual host failure becomes a per-host error.
 
 ---
 
 ### `attacksurface_inspect_tls` <sub>tool</sub>
 
-- Accepts 1–1000 hosts, validates the complete list before I/O, and processes the first 50 in input order. `processedCount` and exact `remainingHosts` appear on both surfaces, including all-host failures; resubmit the remainder to continue. Port defaults to 443 and handshake timeout to 8000ms (1000–30000ms).
+- Accepts 1–1000 hosts and processes the first 50 in input order; `processedCount` and `remainingHosts` show what to resubmit. Port defaults to 443 and handshake timeout to 8000ms (1000–30000ms).
 - Returns negotiated protocol, cipher, leaf certificate and chain depth, SANs, issuer, validity window, days to expiry, and validation status. Invalid, expired, and self-signed certificates are reported; one host failure becomes a per-host error.
-- Chain trust (`validationAuthorized`/`validationError`) and requested-host identity (`identityAuthorized`/`identityError`) are separate checks. Identity is checked against the raw leaf even for an untrusted chain; an unavailable or unverifiable leaf means unknown identity, with verification errors reported.
-- Unparseable validity bounds retain their raw values and add findings. `daysUntilExpiry` is null only when expiry cannot be parsed; a malformed start date does not erase a known expiry.
+- Chain trust (`validationAuthorized`/`validationError`) and hostname match (`identityAuthorized`/`identityError`) are separate checks. `daysUntilExpiry` is null only when the expiry date cannot be parsed.
 
 ---
 
 ### `attacksurface_probe_http` <sub>tool</sub>
 
-- Accepts one HTTP(S) URL; timeout defaults to 10000ms (1000–30000ms). Follows up to ten redirects with an SSRF check at every hop; a refused target produces `blocked_target`. Another redirect at the limit returns `finalStatus: 0` and a `transportError`.
-- The timeout is one total budget for DNS, redirects, headers, and body inspection. `bodyInspection` reports `complete` only after observed EOF, `limited` at the 64,000-byte prefix cap, `failed` on body failure, or `not_read` without a final response. Body failures retain usable status and headers; caller cancellation propagates.
-- Returns status, redirect chain, headers, security-header findings (HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy, cookie flags, CORS reflection), and technology detections with their triggering evidence.
-- Header findings check supported framing/nosniff tokens, positive valid HSTS, and exact cookie attribute names. CSP analysis covers observed `frame-ancestors` restrictions, not general policy validity. Raw headers remain available alongside findings.
-- Cloudflare server banners identify a CDN; AWS ELB banners identify edge infrastructure (`other`). Neither banner alone establishes WAF protection.
+- Accepts one HTTP(S) URL; timeout defaults to 10000ms (1000–30000ms) and covers the whole probe. Follows up to ten redirects with an SSRF check at every hop; a refused target produces `blocked_target`, and exceeding the redirect limit returns `finalStatus: 0` and a `transportError`.
+- Returns status, redirect chain, raw headers, security-header findings (HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy, cookie flags, CORS reflection), and technology detections with their triggering evidence. CSP analysis covers `frame-ancestors` only.
+- `bodyInspection` reports `complete`, `limited` (64,000-byte prefix cap), `failed`, or `not_read`; a body failure keeps the status and headers.
 
 ---
 
 ### `attacksurface_lookup_registration` <sub>tool</sub>
 
-- Accepts a domain, unscoped IP, or CIDR with one decimal integer prefix (IPv4 0–32, IPv6 0–128); `type` (`auto` / `domain` / `ip`) controls interpretation. Uses RDAP first, then authoritative WHOIS port 43 when needed.
-- Domain results include registrar, EPP statuses, lifecycle events, nameservers, and DNSSEC; IP/CIDR results include netblock, allocation CIDRs, ASN, and country. Sparse or redacted fields stay unknown.
-- WHOIS explicit no-match returns `no_match`; missing or failed referrals and empty/unrecognized authoritative responses return `source_unavailable`. Allocation ranges become exact CIDR coverage; invalid allocation text remains in `rawWhois`. The complete raw response is rendered as literal text, as are upstream strings in registration, HTTP, TLS, DNS, and Shodan output.
+- Accepts a domain, IP, or CIDR (prefix IPv4 0–32, IPv6 0–128); `type` (`auto` / `domain` / `ip`) controls interpretation. Uses RDAP first, then WHOIS when needed.
+- Domain results include registrar, EPP statuses, lifecycle events, nameservers, and DNSSEC; IP/CIDR results include netblock, allocation CIDRs, ASN, and country. Sparse or redacted fields stay unknown, and the raw WHOIS response is kept in `rawWhois`.
+- An explicit WHOIS no-match returns `no_match`; a failed referral or an empty or unrecognized WHOIS response returns `source_unavailable`.
 
 ---
 
 ### `attacksurface_lookup_host` <sub>tool</sub>
 
-- `mode: "host"` (default) looks up one IP; `mode: "search"` accepts an internet-wide query with optional `facets` and may consume Shodan query credits. Requires `SHODAN_API_KEY`.
-- Both modes reject blank targets. Host mode accepts bare IPv4/IPv6 addresses and returns `invalid_target` for other syntax before contacting Shodan; search queries are preserved verbatim.
-- Search `page` is a positive integer defaulting to 1; it is ignored in host mode. Each call fetches exactly one 100-match page, returning `page`, `pageSize`, `hasMore`, `nextPage` and a prefilled `continuation` preserving query and facets. Later pages are opt-in and may consume credits; empty pages terminate even if Shodan's total is stale.
+- `mode: "host"` (default) looks up one bare IPv4/IPv6 address and returns `invalid_target` for anything else; `mode: "search"` takes an internet-wide query with optional `facets` and may consume Shodan query credits. Requires `SHODAN_API_KEY`.
+- Search returns one 100-match page per call (`page` defaults to 1, ignored in host mode), with `hasMore`, `nextPage`, and a prefilled `continuation`. Later pages are opt-in and may consume credits.
 - Returns ports, banners, software versions, hostnames, ASN, and geography from Shodan's last scan. Missing credentials produce `source_unavailable`; no host data produces `no_data`. The server performs no port scans.
 
 ---
 
 ### `attacksurface_recon_guidance` <sub>tool</sub>
 
-- Takes prior findings (hosts, certificates, missing headers, software versions, ports). `triage` includes all findings ordered by urgency; `posture` selects TLS/header hardening; `coverage` selects inspection/version gaps and observed-service verification. SSH/RDP and other ports are informational inventory evidence, never proof of a vulnerability. Empty evidence reports unknown coverage.
-- Suggestions use `{toolName, reason, args}` and target registered local tools. Product/version advisory checks remain in priorities and rendered text. No external executable calls or active scans are emitted.
-- Independent `priorityOffset`/`suggestionOffset` pages use `limit` default 50 (larger requests clamp to 50). Totals, returned counts and next offsets appear on both surfaces. Resubmit the original findings/topic with the next offsets; when one is null, use that collection's total to keep it exhausted. The complete serialized response targets 24,000 bytes, except one complete oversized record with an explicit notice. `plan` is a concise topic/coverage summary; detailed actions remain in `priorities` and render once in text.
+- Takes prior findings (hosts, certificates, missing headers, software versions, ports). Topic `triage` covers all findings ordered by urgency, `posture` covers TLS/header hardening, and `coverage` covers inspection and version gaps. Open ports are inventory evidence, never proof of a vulnerability.
+- Returns `priorities` plus suggestions as `{toolName, reason, args}` that target local tools only; no external calls or active scans are emitted.
+- `priorityOffset` and `suggestionOffset` page independently with `limit` (default 50, max 50). Resubmit the original findings and topic with the next offsets.
 
 ---
 
 ### `attacksurface://surface/{domain}` <sub>resource</sub>
 
 - Takes a domain and returns an `application/json` snapshot equivalent to a standard-depth `attacksurface_map_domain` call.
-- Includes subdomain and live-host counts plus per-host DNS/TLS/HTTP posture and errors. Candidate resolution uses the same apex-first cap as mapping; a separate 50-live-host detail cap limits posture work. `coverage` discloses both omission sets with executable follow-up calls, while notes retain source incompleteness and failed legs.
+- Includes subdomain and live-host counts plus per-host DNS/TLS/HTTP posture and errors. Resolution uses the same cap as mapping, and posture detail covers at most 50 live hosts; `coverage` lists what was omitted with follow-up calls.
 
 ## Features
 
@@ -253,7 +246,7 @@ All variables are optional — the server boots and delivers its keyless core wi
 | `ATTACKSURFACE_HTTP_USER_AGENT` | Default User-Agent for `attacksurface_probe_http` (overridable per call). | `attack-surface-mcp-server/passive-recon (+https://github.com/cyanheads/attack-surface-mcp-server)` |
 | `ATTACKSURFACE_MAX_SUBDOMAINS` | Map/snapshot resolution cap; enumeration also caps each page at 50 candidates. | `200` |
 | `ATTACKSURFACE_RDAP_BOOTSTRAP_URL` | RDAP bootstrap base URL; override for a private/mirrored RDAP. | `https://rdap.org` |
-| `ATTACKSURFACE_ALLOW_PRIVATE_TARGETS` | Set `true` to permit non-public target ranges for trusted internal-network assessment; URL parsing and HTTP(S) scheme checks remain enforced. **Leave `false` on any public deployment.** | `false` |
+| `ATTACKSURFACE_ALLOW_PRIVATE_TARGETS` | Set `true` to permit non-public target ranges for trusted internal assessment. **Leave `false` on any public deployment.** | `false` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for HTTP server. | `3010` |
 | `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. The server declares `stateless`; a value set here overrides it. Ignored under stdio. | `stateless` |
