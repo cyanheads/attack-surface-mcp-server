@@ -1,6 +1,6 @@
 # attack-surface-mcp-server - Directory Structure
 
-Generated on: 2026-10-16 14:26:43
+Generated on: 2026-10-30 08:48:23
 
 ```text
 attack-surface-mcp-server/
@@ -39,6 +39,8 @@ attack-surface-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -214,6 +216,8 @@ attack-surface-mcp-server/
 │   │   └── session-mode.test.ts
 │   ├── prompts/
 │   ├── resources/
+│   ├── scripts/
+│   │   └── bundle-agent-docs.test.ts
 │   ├── smoke/
 │   │   └── definitions.test.ts
 │   ├── tools/
@@ -249,7 +253,9 @@ attack-surface-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json
