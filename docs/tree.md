@@ -1,6 +1,6 @@
 # attack-surface-mcp-server - Directory Structure
 
-Generated on: 2026-10-30 08:48:23
+Generated on: 2026-10-30 09:16:40
 
 ```text
 attack-surface-mcp-server/
@@ -28,6 +28,7 @@ attack-surface-mcp-server/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
+│   ├── 0.5.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -138,6 +139,9 @@ attack-surface-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── attack-surface-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-10-30
+
+Publish a defensive assessment guide over MCP, preserve raw domain text in structured guidance, and retain SDK skill modules in desktop bundles.
+
 ## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-10-16 · ⚠️ Breaking
 
 Bounded discovery pages and actionable local review guidance.
