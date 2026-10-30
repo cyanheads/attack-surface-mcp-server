@@ -8,6 +8,19 @@ import { describe, expect, it } from 'vitest';
 import { reconGuidanceTool } from '@/mcp-server/tools/definitions/recon-guidance.tool.js';
 
 describe('attacksurface_recon_guidance contract', () => {
+  it('keeps domain text raw in structured output and encodes only the text twin', async () => {
+    const result = await reconGuidanceTool.handler(
+      reconGuidanceTool.input.parse({ findings: { domain: '<b>*domain*</b>', hosts: [] } }),
+      createMockContext(),
+    );
+    expect(result.plan).toBe(
+      'Defensive review — <b>*domain*</b>. Topic: triage; 1 of 1 priorities and 0 of 0 local calls on this page. Assess only assets you own or are authorized to assess.',
+    );
+    expect(reconGuidanceTool.format?.(result)?.[0]).toMatchObject({
+      text: expect.stringContaining('\\<b>\\*domain\\*\\</b>'),
+    });
+  });
+
   it('returns schema-valid priorities, follow-up calls, logs, and complete format output', async () => {
     const ctx = createMockContext();
     const result = await reconGuidanceTool.handler(
@@ -55,7 +68,7 @@ describe('attacksurface_recon_guidance contract', () => {
     const blocks = reconGuidanceTool.format?.(result);
     expect(blocks).toEqual([{ type: 'text', text: expect.any(String) }]);
     expect(blocks?.[0]).toMatchObject({
-      text: expect.stringContaining('Defensive review — `example.com`'),
+      text: expect.stringContaining('Defensive review — example.com'),
     });
     expect(blocks?.[0]).toMatchObject({ text: expect.stringContaining('TLSv1.1') });
     expect(result.priorities.some((p) => p.finding.includes('nginx'))).toBe(false);

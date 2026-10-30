@@ -4,6 +4,7 @@
  */
 import { isIP } from 'node:net';
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { literalText } from '@/utils/literal-text.js';
 import { NextCallSchema } from '@/utils/next-call.js';
 import { RESPONSE_BYTE_TARGET, responseBytes } from '@/utils/response-budget.js';
@@ -256,7 +257,7 @@ export const reconGuidanceTool = tool('attacksurface_recon_guidance', {
     const selectedP = priorities.slice(input.priorityOffset, input.priorityOffset + limit);
     const selectedS = suggestions.slice(input.suggestionOffset, input.suggestionOffset + limit);
     const build = (p: number, s: number, oversize = false): Output => ({
-      plan: `Defensive review${input.findings.domain ? ` — ${literalText(input.findings.domain)}` : ''}. Topic: ${input.topic}; ${p} of ${priorities.length} priorities and ${s} of ${suggestions.length} local calls on this page. Assess only assets you own or are authorized to assess.`,
+      plan: `Defensive review${input.findings.domain ? ` — ${input.findings.domain}` : ''}. Topic: ${input.topic}; ${p} of ${priorities.length} priorities and ${s} of ${suggestions.length} local calls on this page. Assess only assets you own or are authorized to assess.`,
       priorities: selectedP.slice(0, p),
       nextToolSuggestions: selectedS.slice(0, s),
       topic: input.topic,
@@ -312,7 +313,7 @@ function formatGuidance(result: Output): Array<{ type: 'text'; text: string }> {
     {
       type: 'text',
       text: [
-        result.plan,
+        escapeMarkdownInline(result.plan),
         '## Priorities',
         ...result.priorities.map(
           (p) => `- **[${p.severity}]** ${literalText(p.finding)} → ${literalText(p.action)}`,
