@@ -22,19 +22,12 @@ await createApp({
   name: 'attack-surface-mcp-server',
   title: 'attack-surface-mcp-server',
   instructions:
-    'Passive, non-intrusive external attack-surface mapping. Assess only assets you own or are ' +
-    'explicitly authorized to test. This server reads public records (Certificate Transparency, ' +
-    "DNS, RDAP/WHOIS) and the target's own published surface (one TLS handshake and one HTTP GET " +
-    'per host) — it never port-scans, exploits, brute-forces, fuzzes, or probes for ' +
-    'vulnerabilities. Output is descriptive (what exists, what the posture is), not an ' +
-    'exploitation plan. Start with attacksurface_map_domain for a full surface map; the per-aspect ' +
-    'tools (enumerate_subdomains, resolve_dns, inspect_tls, probe_http, lookup_registration) back ' +
-    'it for targeted follow-up. All core capabilities are keyless; attacksurface_lookup_host needs ' +
-    'SHODAN_API_KEY and returns source_unavailable without it while everything else keeps working.',
+    "Passive, non-intrusive external attack-surface mapping. Assess only assets you own or are explicitly authorized to test. This server reads public records (Certificate Transparency, DNS, RDAP/WHOIS) and the target's own published surface (TLS handshakes and HTTP GETs); it never port-scans, exploits, brute-forces, fuzzes, or probes for vulnerabilities. Output describes observed assets and posture, never an exploitation plan. Start with attacksurface_map_domain and inspect its coverage and operational notes before drawing estate-wide conclusions; use per-aspect tools for targeted follow-up. Core capabilities are keyless; attacksurface_lookup_host requires SHODAN_API_KEY and returns source_unavailable without it while the other tools remain available.",
   // No per-session state or ctx.requestInput; an explicit MCP_SESSION_MODE still overrides this.
   sessionMode: 'stateless',
   tools: allToolDefinitions,
   resources: allResourceDefinitions,
+  skills: 'skills',
   setup(core) {
     const config = getServerConfig();
     initDnsService();

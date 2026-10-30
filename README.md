@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.4.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/attack-surface-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Fattack-surface-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/attack-surface-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/attack-surface-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/%40cyanheads%2Fattack-surface-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/attack-surface-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,6 +29,8 @@
 ## Overview
 
 Passive external attack-surface mapping (EASM) over Certificate Transparency logs, DNS, TLS, HTTP, and RDAP/WHOIS registries, with optional Shodan host intelligence. Discover subdomains, resolve DNS records, and inspect TLS and HTTP security posture across a domain's live hosts.
+
+The [attack-surface guide](skills/attack-surface-guide/SKILL.md) covers assessment coverage and evidence-preserving triage. It ships with plugin, npm, MCPB and Docker distributions and is served through the MCP Skills extension for supporting clients.
 
 ### Tools
 
@@ -120,7 +122,7 @@ All resource data is also reachable via tools — tool-only clients lose nothing
 
 ### `attacksurface://surface/{domain}` <sub>resource</sub>
 
-- Takes a domain and returns an `application/json` snapshot equivalent to a standard-depth `attacksurface_map_domain` call.
+- Takes a domain and returns an `application/json` posture snapshot; use `attacksurface_map_domain` for registration and a guidance handoff.
 - Includes subdomain and live-host counts plus per-host DNS/TLS/HTTP posture and errors. Resolution uses the same cap as mapping, and posture detail covers at most 50 live hosts; `coverage` lists what was omitted with follow-up calls.
 
 ## Features
@@ -143,96 +145,26 @@ Agent-friendly output:
 
 ## Getting started
 
-Add the following to your MCP client configuration file. Every tool except `attacksurface_lookup_host` works with no configuration — the keyless core boots on an empty environment.
+Add it to Claude Code:
 
-```json
-{
-  "mcpServers": {
-    "attack-surface-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/attack-surface-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
-    }
-  }
-}
+```sh
+claude mcp add attack-surface-mcp-server -- npx -y @cyanheads/attack-surface-mcp-server
 ```
 
-Or with npx (no Bun required):
+For other clients, add this to the MCP config file:
 
 ```json
 {
   "mcpServers": {
     "attack-surface-mcp-server": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@cyanheads/attack-surface-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
+      "args": ["-y", "@cyanheads/attack-surface-mcp-server"]
     }
   }
 }
 ```
 
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "attack-surface-mcp-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/attack-surface-mcp-server:latest"]
-    }
-  }
-}
-```
-
-To enable Shodan host intelligence (`attacksurface_lookup_host`), add `SHODAN_API_KEY` to the `env` block.
-
-For Streamable HTTP, set the transport and start the server:
-
-```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
-# Server listens at http://localhost:3010/mcp
-```
-
-### Prerequisites
-
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
-- No API key required for the core tools. Optional: a [Shodan API key](https://account.shodan.io/) for `attacksurface_lookup_host`, and a [Certspotter API key](https://sslmate.com/certspotter/api/) to raise CT-fallback rate limits.
-
-### Installation
-
-1. **Clone the repository:**
-
-```sh
-git clone https://github.com/cyanheads/attack-surface-mcp-server.git
-```
-
-2. **Navigate into the directory:**
-
-```sh
-cd attack-surface-mcp-server
-```
-
-3. **Install dependencies:**
-
-```sh
-bun install
-```
-
-4. **Configure environment (optional):**
-
-```sh
-cp .env.example .env
-# edit .env only if you want Shodan, a Certspotter key, or non-default behavior
-```
+Every tool except `attacksurface_lookup_host` works without an API key. To enable Shodan host intelligence, set `SHODAN_API_KEY`; an optional `CERTSPOTTER_API_KEY` raises CT-fallback rate limits. For Docker or a source build, see [Running the server](#running-the-server).
 
 ## Configuration
 
@@ -257,6 +189,18 @@ All variables are optional — the server boots and delivers its keyless core wi
 See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ## Running the server
+
+Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+
+Clone and install:
+
+```sh
+git clone https://github.com/cyanheads/attack-surface-mcp-server.git
+cd attack-surface-mcp-server && bun install
+cp .env.example .env
+```
+
+All configuration is optional; edit `.env` for Shodan, a Certspotter key, or non-default behavior.
 
 ### Local development
 
@@ -283,11 +227,10 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 ### Docker
 
 ```sh
-docker build -t attack-surface-mcp-server .
-docker run --rm -e MCP_TRANSPORT_TYPE=http -p 3010:3010 attack-surface-mcp-server
+docker run --rm -p 3010:3010 ghcr.io/cyanheads/attack-surface-mcp-server:latest
 ```
 
-The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/attack-surface-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
+The image defaults to HTTP transport, stateless session mode, and logs to `/var/log/attack-surface-mcp-server`. To run it over stdio from an MCP client, use `"command": "docker"` with `"args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/attack-surface-mcp-server:latest"]`. To build locally, `docker build -t attack-surface-mcp-server .`; OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
 
 ## Project structure
 

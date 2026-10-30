@@ -14,7 +14,7 @@
 # output. A stage that compiles a native addon needs the target-arch toolchain
 # and cannot cross-compile this way — drop the flag there.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.3 AS build
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.4 AS build
 
 WORKDIR /usr/src/app
 
@@ -31,6 +31,8 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 # Copy the rest of the source code
 COPY . .
 
+RUN mkdir -p skills
+
 # Build the application
 RUN bun run build
 
@@ -41,7 +43,7 @@ RUN bun run build
 # Run the security scanner and OTel installer natively, then cross-install
 # production packages for the target architecture.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.3 AS deps
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.4 AS deps
 
 WORKDIR /usr/src/app
 
@@ -81,7 +83,7 @@ RUN rm -rf node_modules/@socketsecurity/bun-security-scanner
 # application. It uses a slim base image and only includes production
 # dependencies and build artifacts.
 # ==============================================================================
-FROM oven/bun:1.4.3-slim AS production
+FROM oven/bun:1.4.4-slim AS production
 
 WORKDIR /usr/src/app
 
@@ -103,6 +105,7 @@ COPY --from=deps /usr/src/app/node_modules ./node_modules
 
 # Copy the compiled application code from the build stage
 COPY --from=build /usr/src/app/dist ./dist
+COPY --from=build /usr/src/app/skills ./skills
 
 # Mirror CLI (MirrorService adopters only — Tier 3, opt-in):
 # Copy your mirror lifecycle scripts and emit a runtime tsconfig so Bun resolves
