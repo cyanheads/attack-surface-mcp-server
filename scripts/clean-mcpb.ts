@@ -39,7 +39,7 @@ import { fileURLToPath } from 'node:url';
 
 /**
  * Agent-doc entries under `node_modules/` that must not ship in a bundle.
- * Match only at package roots: SDK `dist/esm/ext/skills/` contains executable
+ * Match only at package roots: SDK `dist/ext/skills/` contains executable
  * modules, not agent documentation (mcp-ts-core #794).
  * KEEP IN SYNC with `AGENT_DOC_ENTRY` in `scripts/lint-packaging.ts`
  * (post-bundle content check) — edit both literals together. The assertion that

@@ -232,7 +232,7 @@ export const CRITICAL_RUNTIME_PATHS = [
 
 /**
  * Agent-doc entries under `node_modules/` that must not ship in a bundle.
- * Match only at package roots: SDK `dist/esm/ext/skills/` contains executable
+ * Match only at package roots: SDK `dist/ext/skills/` contains executable
  * modules, not agent documentation (mcp-ts-core #794).
  * `framework-skills/` is this framework's tree; `skills/` covers any other
  * dependency that vendors agent skills.
