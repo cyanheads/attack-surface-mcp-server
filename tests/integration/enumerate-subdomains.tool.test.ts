@@ -141,9 +141,9 @@ describe('attacksurface_enumerate_subdomains', () => {
     expect(JSON.stringify(first.content)).toContain('a.example.com');
     expect(JSON.stringify(first.content)).toContain('SERVFAIL');
     expect(dnsBoundary.resolve).toHaveBeenCalledTimes(2);
-    const call = first.structuredContent?.continuation as { args: unknown };
-    expect(enumerateSubdomainsTool.input.safeParse(call.args).success).toBe(true);
-    const second = await runToolContract(enumerateSubdomainsTool, call.args);
+    const call = enumerateSubdomainsTool.output.parse(first.structuredContent).continuation;
+    const continuation = enumerateSubdomainsTool.input.parse(call?.args);
+    const second = await runToolContract(enumerateSubdomainsTool, continuation);
     expect(second.structuredContent).toMatchObject({
       nextOffset: null,
       remainingCount: 0,
@@ -191,7 +191,9 @@ describe('attacksurface_enumerate_subdomains', () => {
     });
     expect(dnsBoundary.resolve).toHaveBeenCalledWith('A', names[1]);
     expect(JSON.stringify(second.content)).toContain('oversized');
-    expect(second.structuredContent?.subdomains).toHaveLength(1);
+    expect(enumerateSubdomainsTool.output.parse(second.structuredContent).subdomains).toHaveLength(
+      1,
+    );
   });
 
   it('returns normalized provenance and liveness with complete structured/format output', async () => {
@@ -323,7 +325,9 @@ describe('attacksurface_enumerate_subdomains', () => {
         { name: 'broken.example.com', addressError: 'A: SERVFAIL; AAAA: SERVFAIL' },
       ],
     });
-    expect(result.structuredContent?.subdomains).toHaveLength(1);
+    expect(enumerateSubdomainsTool.output.parse(result.structuredContent).subdomains).toHaveLength(
+      1,
+    );
     expect(JSON.stringify(result.content)).toContain('broken.example.com');
     expect(JSON.stringify(result.content)).toContain('A: SERVFAIL; AAAA: SERVFAIL');
     expect(JSON.stringify(result.content)).not.toContain('dead.example.com');

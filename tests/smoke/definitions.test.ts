@@ -36,7 +36,24 @@ describe('MCP definition catalog', () => {
     expect(definition?.title).toBe('attacksurface://surface/{domain}');
     expect(definition?.handler).toBeTypeOf('function');
 
-    await expect(definition?.list?.()).resolves.toEqual({
+    const unexpectedRequest = async (): Promise<never> => {
+      throw new Error('Listing a static resource must not make a client request.');
+    };
+    await expect(
+      definition?.list?.({
+        mcpReq: {
+          id: 1,
+          method: 'resources/list',
+          signal: new AbortController().signal,
+          requestState: () => undefined,
+          send: unexpectedRequest,
+          notify: unexpectedRequest,
+          log: unexpectedRequest,
+          elicitInput: unexpectedRequest,
+          requestSampling: unexpectedRequest,
+        },
+      }),
+    ).resolves.toEqual({
       resources: [
         {
           uri: 'attacksurface://surface/example.com',

@@ -24,7 +24,7 @@ describe('bounded guidance', () => {
         ],
       },
     });
-    expect(healthy.structuredContent.priorities).toEqual([
+    expect(reconGuidanceTool.output.parse(healthy.structuredContent).priorities).toEqual([
       expect.objectContaining({
         finding: 'No selected findings require action based on the supplied evidence.',
       }),
@@ -33,7 +33,7 @@ describe('bounded guidance', () => {
       topic: 'posture',
       findings: { hosts: [] },
     });
-    expect(empty.structuredContent.priorities).toEqual([
+    expect(reconGuidanceTool.output.parse(empty.structuredContent).priorities).toEqual([
       expect.objectContaining({
         finding: 'Assessment coverage is unknown from the supplied findings.',
       }),
@@ -124,7 +124,9 @@ describe('bounded guidance', () => {
       ],
     };
     const results = [];
-    for (const topic of ['triage', 'posture', 'coverage']) {
+    for (const topic of ['triage', 'posture', 'coverage'] satisfies Array<
+      'triage' | 'posture' | 'coverage'
+    >) {
       const result = await runToolContract(reconGuidanceTool, { findings, topic });
       expect(result.isError).not.toBe(true);
       const output = reconGuidanceTool.output.parse(result.structuredContent);

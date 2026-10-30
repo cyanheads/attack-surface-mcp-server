@@ -4,6 +4,7 @@
  */
 
 import { EventEmitter } from 'node:events';
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -196,7 +197,7 @@ describe('attacksurface_map_domain', () => {
         },
       ],
     });
-    const calls = result.structuredContent?.nextToolSuggestions as Array<{ args: unknown }>;
+    const calls = mapDomainTool.output.parse(result.structuredContent).nextToolSuggestions;
     const args = reconGuidanceTool.input.parse(calls[0]?.args);
     expect(args.findings.hosts[0]).not.toHaveProperty('certDaysUntilExpiry');
     expect(JSON.stringify(result.content)).toContain('attacksurface_recon_guidance');
@@ -395,7 +396,10 @@ describe('attacksurface_map_domain', () => {
       return new Response('');
     });
     dnsBoundary.resolve.mockImplementation(async (type) => (type === 'A' ? ['93.184.216.34'] : []));
-    const result = await surfaceResource.handler({ domain: 'example.com' }, createMockContext());
+    const result = mapDomainTool.output
+      .pick({ coverage: true, notes: true })
+      .extend({ hosts: z.array(z.object({ host: z.string() })) })
+      .parse(await surfaceResource.handler({ domain: 'example.com' }, createMockContext()));
     expect(result.coverage).toMatchObject({
       discovered: 56,
       examined: 52,
@@ -407,7 +411,10 @@ describe('attacksurface_map_domain', () => {
     for (const call of result.coverage.retrieval) {
       if (call.toolName === 'attacksurface_probe_http')
         expect(Object.keys(call.args)).toEqual(['url']);
-      else expect((call.args.hosts as string[]).length).toBeLessThanOrEqual(50);
+      else
+        expect(
+          z.object({ hosts: z.array(z.string()) }).parse(call.args).hosts.length,
+        ).toBeLessThanOrEqual(50);
     }
     expect(result.notes.some((n) => n.includes('Candidate resolution capped'))).toBe(true);
     expect(result.notes.some((n) => n.includes('Host detail capped'))).toBe(true);

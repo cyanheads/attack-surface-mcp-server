@@ -252,7 +252,7 @@ describe('attacksurface_lookup_host', () => {
     'rejects blank target %j at the schema in either mode',
     async (target) => {
       fetchMock.mockImplementation(async () => Response.json({}));
-      for (const mode of ['host', 'search']) {
+      for (const mode of ['host', 'search'] satisfies Array<'host' | 'search'>) {
         const result = await runToolContract(lookupHostTool, { target, mode });
         expect(result.isError).toBe(true);
         expect(result.structuredContent).toMatchObject({

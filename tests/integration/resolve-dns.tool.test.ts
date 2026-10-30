@@ -99,7 +99,7 @@ describe('attacksurface_resolve_dns', () => {
       if (type === 'MX') return [{ priority: 10, exchange: 'mail.example.com' }];
       throw dnsError('ENODATA');
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: resolveDnsTool.errors });
 
     const result = await resolveDnsTool.handler(
       resolveDnsTool.input.parse({
@@ -210,7 +210,7 @@ describe('attacksurface_resolve_dns', () => {
         recordTypes: ['A'],
         resolvers: ['8.8.8.8'],
       }),
-      createMockContext(),
+      createMockContext({ errors: resolveDnsTool.errors }),
     );
 
     expect(result).toEqual(expect.schemaMatching(resolveDnsTool.output));
@@ -224,7 +224,7 @@ describe('attacksurface_resolve_dns', () => {
   });
 
   it('enriches an all-unresolved result with guidance', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: resolveDnsTool.errors });
     const result = await resolveDnsTool.handler(
       resolveDnsTool.input.parse({
         hosts: ['missing.example.com'],
