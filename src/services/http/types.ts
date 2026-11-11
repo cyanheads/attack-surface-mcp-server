@@ -25,17 +25,19 @@ export interface TechDetection {
   version?: string;
 }
 
-/** Result of the security-header audit. */
+/** Final-response audit. Without a final response, headers are null, lists empty, and reflection false. */
 export interface SecurityHeaderAudit {
   /** Set-Cookie flags audit, one entry per cookie. */
   cookies: CookieAudit[];
+  /** Access-Control-Allow-Credentials value as observed, or null when absent or unobserved. */
+  corsAllowCredentials: string | null;
   /** Access-Control-Allow-Origin value, or null when absent. */
   corsAllowOrigin: string | null;
-  /** True when the server reflected an arbitrary Origin into ACAO (potential misconfiguration). */
+  /** True when the final response's Access-Control-Allow-Origin matched the probe origin. */
   corsReflectsOrigin: boolean;
   /** Content-Security-Policy value, or null when absent. */
   csp: string | null;
-  /** Human-readable findings for missing/weak headers. */
+  /** Human-readable findings based on the final response's scheme and headers. */
   findings: string[];
   /** HSTS (Strict-Transport-Security) header value, or null when absent. */
   hsts: string | null;
@@ -67,7 +69,7 @@ export interface HttpProbeResult {
   bodyInspection: { status: 'complete' | 'limited' | 'failed' | 'not_read'; error: string | null };
   /** ISO 8601 timestamp of the probe. */
   checkedAt: string;
-  /** Final HTTP status code. */
+  /** Final HTTP status code, or 0 when no final response was observed. */
   finalStatus: number;
   /** Final URL after following redirects. */
   finalUrl: string;
@@ -79,7 +81,7 @@ export interface HttpProbeResult {
   securityAudit: SecurityHeaderAudit;
   /** Technology fingerprint detections, each with its triggering evidence. */
   technologies: TechDetection[];
-  /** Connection/transport error message, or null on success. */
+  /** Error when no final response was observed, or null after final headers. */
   transportError: string | null;
   /** URL probed (the initial request URL). */
   url: string;

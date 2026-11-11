@@ -45,11 +45,19 @@ const SecurityAuditSchema = z.object({
     .nullable()
     .describe('Permissions-Policy value, or null when absent.'),
   cookies: z.array(CookieAuditSchema).describe('Per-cookie security-flag audit.'),
+  corsAllowCredentials: z
+    .string()
+    .nullable()
+    .describe(
+      'Observed Access-Control-Allow-Credentials value, or null when absent or unobserved.',
+    ),
   corsAllowOrigin: z.string().nullable().describe('Access-Control-Allow-Origin value, or null.'),
   corsReflectsOrigin: z
     .boolean()
-    .describe('True when the server reflected an arbitrary request Origin into ACAO.'),
-  findings: z.array(z.string()).describe('Human-readable findings for missing or weak headers.'),
+    .describe('True when the final Access-Control-Allow-Origin matched the probe origin.'),
+  findings: z
+    .array(z.string())
+    .describe('Findings based on the final response scheme and headers.'),
 });
 
 const TechDetectionSchema = z
@@ -65,10 +73,28 @@ const TechDetectionSchema = z
   })
   .describe('A technology detection with its triggering evidence.');
 
+/** Validate the record in place so Zod preserves every own header name, including __proto__. */
+const ResponseHeadersSchema = z
+  .unknown()
+  .refine((value): value is Record<string, string> => {
+    if (typeof value !== 'object' || value === null) return false;
+    const prototype: unknown = Object.getPrototypeOf(value);
+    return (
+      (prototype === null || prototype === Object.prototype) &&
+      Object.values(value).every((header) => typeof header === 'string')
+    );
+  })
+  .meta({
+    type: 'object',
+    propertyNames: { type: 'string' },
+    additionalProperties: { type: 'string' },
+  })
+  .describe('Final-response headers (lower-cased keys).');
+
 export const probeHttpTool = tool('attacksurface_probe_http', {
   title: 'attacksurface_probe_http',
   description:
-    'Passively probe a single URL with one HTTP(S) GET, following redirects. Returns the final status, the full redirect chain, response headers, a security-header audit (HSTS, CSP, X-Frame-Options, cookie Secure/HttpOnly/SameSite flags, and CORS origin-reflection), and an evidence-bound technology fingerprint (server, framework, CDN, WAF, CMS) drawn from headers and lightweight body markers. Strictly one request per host — no path traversal, parameter injection, or multi-method probing. Each redirect hop is validated against an SSRF guard. Use only on assets you own or are authorized to assess.',
+    'Passively probe a single URL with HTTP(S) GET requests, following redirects. Returns the final status, the full redirect chain, response headers, a security-header audit (HSTS, CSP, X-Frame-Options, cookie Secure/HttpOnly/SameSite flags, and CORS origin-reflection), and an evidence-bound technology fingerprint (server, framework, CDN, WAF, CMS) drawn from headers and lightweight body markers. Each redirect hop is validated against an SSRF guard. Use only on assets you own or are authorized to assess.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     url: z
@@ -98,10 +124,10 @@ export const probeHttpTool = tool('attacksurface_probe_http', {
     redirectChain: z
       .array(RedirectHopSchema)
       .describe('Followed redirects, capped at ten; another redirect produces a transport error.'),
-    headers: z
-      .record(z.string(), z.string())
-      .describe('Final-response headers (lower-cased keys).'),
-    securityAudit: SecurityAuditSchema.describe('Security-header audit.'),
+    headers: ResponseHeadersSchema,
+    securityAudit: SecurityAuditSchema.describe(
+      'Final-response audit. Without a final response, header values are null, cookies and findings are empty, and reflection is false.',
+    ),
     technologies: z.array(TechDetectionSchema).describe('Technology detections with evidence.'),
     checkedAt: z.string().describe('ISO 8601 timestamp of the probe.'),
     bodyInspection: z
@@ -122,6 +148,12 @@ export const probeHttpTool = tool('attacksurface_probe_http', {
   },
   errors: [
     {
+      reason: 'invalid_url',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The supplied value cannot be parsed as an absolute URL.',
+      recovery: 'Provide an absolute HTTP(S) URL, such as https://example.com.',
+    },
+    {
       reason: 'blocked_target',
       code: JsonRpcErrorCode.Forbidden,
       when: 'The URL resolves to a private/loopback/metadata address, or uses a non-http(s) scheme.',
@@ -131,6 +163,9 @@ export const probeHttpTool = tool('attacksurface_probe_http', {
   ],
 
   async handler(input, ctx) {
+    if (!URL.canParse(input.url)) {
+      throw ctx.fail('invalid_url', 'The supplied value is not an absolute URL.');
+    }
     const result = await getHttpService().probe(input.url, input.userAgent, input.timeoutMs, ctx);
 
     // The service surfaces SSRF rejections via its transportError field with an SSRF_BLOCKED
@@ -167,39 +202,53 @@ export const probeHttpTool = tool('attacksurface_probe_http', {
     }
 
     const a = result.securityAudit;
+    const observed = result.transportError === null;
+    const missingHeader = observed ? 'absent' : 'not observed';
     lines.push('### Security headers');
-    lines.push(`- **HSTS:** ${literalText(a.hsts ?? 'absent')}`);
-    lines.push(`- **CSP:** ${literalText(a.csp ?? 'absent')}`);
-    lines.push(`- **X-Frame-Options:** ${literalText(a.xFrameOptions ?? 'absent')}`);
-    lines.push(`- **X-Content-Type-Options:** ${literalText(a.xContentTypeOptions ?? 'absent')}`);
-    lines.push(`- **Referrer-Policy:** ${literalText(a.referrerPolicy ?? 'absent')}`);
-    lines.push(`- **Permissions-Policy:** ${literalText(a.permissionsPolicy ?? 'absent')}`);
+    lines.push(`- **HSTS:** ${literalText(a.hsts ?? missingHeader)}`);
+    lines.push(`- **CSP:** ${literalText(a.csp ?? missingHeader)}`);
+    lines.push(`- **X-Frame-Options:** ${literalText(a.xFrameOptions ?? missingHeader)}`);
     lines.push(
-      `- **CORS Allow-Origin:** ${literalText(a.corsAllowOrigin ?? 'absent')} (reflects arbitrary origin: ${a.corsReflectsOrigin})`,
+      `- **X-Content-Type-Options:** ${literalText(a.xContentTypeOptions ?? missingHeader)}`,
+    );
+    lines.push(`- **Referrer-Policy:** ${literalText(a.referrerPolicy ?? missingHeader)}`);
+    lines.push(`- **Permissions-Policy:** ${literalText(a.permissionsPolicy ?? missingHeader)}`);
+    lines.push(
+      `- **CORS Allow-Origin:** ${literalText(a.corsAllowOrigin ?? missingHeader)} (reflects probe origin: ${observed ? a.corsReflectsOrigin : 'not observed'})`,
+    );
+    lines.push(
+      `- **CORS Allow-Credentials:** ${literalText(a.corsAllowCredentials ?? missingHeader)}`,
     );
     lines.push('- **Cookies:**');
-    if (a.cookies.length === 0) lines.push('  - (none)');
+    if (a.cookies.length === 0) lines.push(observed ? '  - (none)' : '  - (not observed)');
     for (const c of a.cookies) {
       lines.push(
         `  - ${literalText(c.name)}: Secure=${c.secure}, HttpOnly=${c.httpOnly}, SameSite=${literalText(c.sameSite ?? 'none')}`,
       );
     }
     lines.push('**Findings:**');
-    if (a.findings.length === 0) lines.push('- (none)');
+    if (a.findings.length === 0) lines.push(observed ? '- (none)' : '- (not observed)');
     for (const f of a.findings) lines.push(`- ${literalText(f)}`);
 
     lines.push('### Technology fingerprint');
-    if (result.technologies.length === 0) lines.push('- (none detected)');
+    if (result.technologies.length === 0)
+      lines.push(observed ? '- (none detected)' : '- (not observed)');
     for (const t of result.technologies) {
       lines.push(
         `- ${literalText(t.name)} ${t.version === undefined ? '' : literalText(t.version)} _(${t.category})_ — ${literalText(t.evidence)}`,
       );
     }
 
-    const headers = Object.entries(result.headers);
-    lines.push(`### Response headers (${headers.length})`);
-    for (const [name, value] of headers)
-      lines.push(`- ${literalText(name)}: ${literalText(value)}`);
+    const headerLines: string[] = [];
+    for (const name in result.headers) {
+      if (Object.hasOwn(result.headers, name)) {
+        const value = result.headers[name];
+        if (value !== undefined) headerLines.push(`- ${literalText(name)}: ${literalText(value)}`);
+      }
+    }
+    lines.push(`### Response headers (${headerLines.length})`);
+    if (!observed) lines.push('- (not observed)');
+    for (const line of headerLines) lines.push(line);
 
     lines.push(`Checked at ${literalText(result.checkedAt)}`);
     return [{ type: 'text', text: lines.join('\n') }];

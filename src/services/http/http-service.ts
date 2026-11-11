@@ -14,7 +14,7 @@ import type { CookieAudit, HttpProbeResult, RedirectHop, SecurityHeaderAudit } f
 
 const MAX_REDIRECTS = 10;
 const BODY_PREFIX_BYTES = 64_000;
-/** A throwaway origin used to test whether the server reflects an arbitrary Origin into CORS. */
+/** The request origin whose reflection is checked in the final response. */
 const CORS_PROBE_ORIGIN = 'https://attack-surface-probe.example';
 
 /** Race a pending I/O operation against the probe budget, removing the listener on settlement. */
@@ -36,7 +36,7 @@ async function withinBudget<T>(operation: Promise<T>, signal: AbortSignal): Prom
 
 /** Flatten Headers into a lower-cased record (multi-value headers joined with ", "). */
 function headersToRecord(headers: Headers): Record<string, string> {
-  const out: Record<string, string> = {};
+  const out: Record<string, string> = Object.create(null);
   headers.forEach((value, key) => {
     out[key.toLowerCase()] = value;
   });
@@ -135,13 +135,9 @@ function framingCsp(raw: string): { restricted: boolean; unknown: boolean } {
   let restricted = false;
   let unknown = false;
   for (const policy of raw.split(',')) {
-    const seen = new Set<string>();
     for (const directive of policy.split(';')) {
       const [name = '', ...sources] = directive.trim().split(/\s+/);
-      const key = name.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      if (key !== 'frame-ancestors') continue;
+      if (name.toLowerCase() !== 'frame-ancestors') continue;
       const recognized = sources.every(
         (source) =>
           source === "'self'" ||
@@ -154,6 +150,8 @@ function framingCsp(raw: string): { restricted: boolean; unknown: boolean } {
       );
       if (!recognized) unknown = true;
       else if (!sources.includes('*')) restricted = true;
+      // Within a policy, the first occurrence of a directive wins.
+      break;
     }
   }
   return { restricted, unknown };
@@ -164,7 +162,6 @@ function auditSecurity(
   headers: Record<string, string>,
   cookies: CookieAudit[],
   isHttps: boolean,
-  corsReflectsOrigin: boolean,
 ): SecurityHeaderAudit {
   const findings: string[] = [];
   const hsts = headers['strict-transport-security'] ?? null;
@@ -174,9 +171,13 @@ function auditSecurity(
   const referrerPolicy = headers['referrer-policy'] ?? null;
   const permissionsPolicy = headers['permissions-policy'] ?? null;
   const corsAllowOrigin = headers['access-control-allow-origin'] ?? null;
+  const corsAllowCredentials = headers['access-control-allow-credentials'] ?? null;
+  const corsReflectsOrigin = corsAllowOrigin === CORS_PROBE_ORIGIN;
+  const allowsCredentials = corsAllowCredentials === 'true';
 
-  if (isHttps && !hsts) findings.push('HSTS (Strict-Transport-Security) is not set.');
-  else if (isHttps && hsts && !effectiveHsts(hsts))
+  if (!isHttps) findings.push('Final response served over plain HTTP.');
+  else if (!hsts) findings.push('HSTS (Strict-Transport-Security) is not set.');
+  else if (!effectiveHsts(hsts))
     findings.push('HSTS does not contain a valid positive max-age policy.');
   if (!csp) findings.push('Content-Security-Policy is not set.');
   const frameTokens = xFrameOptions?.split(',').map((value) => value.trim().toUpperCase()) ?? [];
@@ -198,11 +199,19 @@ function auditSecurity(
   if (xContentTypeOptions?.split(',')[0]?.trim().toLowerCase() !== 'nosniff')
     findings.push('X-Content-Type-Options: nosniff is not set.');
   if (corsAllowOrigin === '*') {
-    findings.push('CORS allows any origin (Access-Control-Allow-Origin: *).');
+    findings.push(
+      'CORS allows any origin for requests without credentials (Access-Control-Allow-Origin: *).',
+    );
+    if (allowsCredentials)
+      findings.push(
+        'Browsers reject Access-Control-Allow-Origin: * with Access-Control-Allow-Credentials: true for requests with credentials mode include.',
+      );
   }
   if (corsReflectsOrigin) {
     findings.push(
-      'CORS reflects an arbitrary request Origin — combined with credentials this is exploitable.',
+      allowsCredentials
+        ? 'CORS reflects the probe Origin and sends Access-Control-Allow-Credentials: true.'
+        : 'CORS reflects the probe Origin without an exact Access-Control-Allow-Credentials: true value.',
     );
   }
   for (const c of cookies) {
@@ -227,6 +236,7 @@ function auditSecurity(
     referrerPolicy,
     permissionsPolicy,
     cookies,
+    corsAllowCredentials,
     corsAllowOrigin,
     corsReflectsOrigin,
     findings,
@@ -255,13 +265,45 @@ export class HttpService {
 
     ctx.signal?.throwIfAborted();
     const controller = new AbortController();
+    const deadlineMessage = `Probe exceeded its ${timeoutMs} ms budget.`;
     const timer = setTimeout(
-      () => controller.abort(new DOMException('The operation was aborted', 'TimeoutError')),
+      () => controller.abort(new DOMException(deadlineMessage, 'TimeoutError')),
       timeoutMs,
     );
     const signal = ctx.signal
       ? AbortSignal.any([controller.signal, ctx.signal])
       : controller.signal;
+
+    const errorMessage = (error: unknown) =>
+      controller.signal.aborted
+        ? deadlineMessage
+        : error instanceof Error
+          ? error.message
+          : String(error);
+    const noFinalResponse = (transportError: string): HttpProbeResult => ({
+      url: rawUrl,
+      finalUrl: currentUrl,
+      finalStatus: 0,
+      redirectChain,
+      headers: {},
+      securityAudit: {
+        hsts: null,
+        csp: null,
+        xFrameOptions: null,
+        xContentTypeOptions: null,
+        referrerPolicy: null,
+        permissionsPolicy: null,
+        cookies: [],
+        corsAllowCredentials: null,
+        corsAllowOrigin: null,
+        corsReflectsOrigin: false,
+        findings: [],
+      },
+      technologies: [],
+      bodyInspection: { status: 'not_read', error: null },
+      checkedAt,
+      transportError,
+    });
 
     try {
       try {
@@ -302,40 +344,17 @@ export class HttpService {
         }
       } catch (err) {
         ctx.signal?.throwIfAborted();
-        return {
-          url: rawUrl,
-          finalUrl: currentUrl,
-          finalStatus: 0,
-          redirectChain,
-          headers: {},
-          securityAudit: auditSecurity({}, [], false, false),
-          technologies: [],
-          bodyInspection: { status: 'not_read', error: null },
-          checkedAt,
-          transportError: err instanceof Error ? err.message : String(err),
-        };
+        return noFinalResponse(errorMessage(err));
       }
 
       if (!finalResponse) {
-        return {
-          url: rawUrl,
-          finalUrl: currentUrl,
-          finalStatus: 0,
-          redirectChain,
-          headers: {},
-          securityAudit: auditSecurity({}, [], false, false),
-          technologies: [],
-          bodyInspection: { status: 'not_read', error: null },
-          checkedAt,
-          transportError: `Exceeded ${MAX_REDIRECTS} redirects without a final response.`,
-        };
+        return noFinalResponse(`Exceeded ${MAX_REDIRECTS} redirects without a final response.`);
       }
 
       const headers = headersToRecord(finalResponse.headers);
       const cookies = auditCookies(finalResponse.headers);
       const isHttps = new URL(currentUrl).protocol === 'https:';
-      const corsReflectsOrigin = headers['access-control-allow-origin'] === CORS_PROBE_ORIGIN;
-      const securityAudit = auditSecurity(headers, cookies, isHttps, corsReflectsOrigin);
+      const securityAudit = auditSecurity(headers, cookies, isHttps);
 
       // Read a bounded body prefix for body-marker fingerprinting.
       let bodyPrefix = '';
@@ -348,7 +367,7 @@ export class HttpService {
         ctx.signal?.throwIfAborted();
         bodyInspection = {
           status: 'failed',
-          error: err instanceof Error ? err.message : String(err),
+          error: errorMessage(err),
         };
       }
 

@@ -43,6 +43,7 @@ describe('literal evidence formatter wiring', () => {
         permissionsPolicy: null,
         cookies: [{ name: singles[3], secure: true, httpOnly: true, sameSite: singles[4] }],
         corsAllowOrigin: singles[5],
+        corsAllowCredentials: null,
         corsReflectsOrigin: false,
         findings: [singles[6]],
       },

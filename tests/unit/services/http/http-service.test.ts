@@ -7,7 +7,19 @@ import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const dnsBoundary = vi.hoisted(() => ({ lookup: vi.fn() }));
-vi.mock('node:dns/promises', () => ({ lookup: dnsBoundary.lookup }));
+vi.mock('node:dns/promises', () => ({
+  lookup: dnsBoundary.lookup,
+  Resolver: class {
+    setServers() {}
+    cancel() {}
+    async resolve4() {
+      return ['8.8.8.8'];
+    }
+    async resolve6() {
+      return [];
+    }
+  },
+}));
 
 import { HttpService } from '@/services/http/http-service.js';
 
@@ -76,9 +88,10 @@ describe('HttpService', () => {
           { name: 'prefs', secure: false, httpOnly: false, sameSite: null },
         ],
         corsAllowOrigin: 'https://attack-surface-probe.example',
+        corsAllowCredentials: null,
         corsReflectsOrigin: true,
         findings: [
-          'CORS reflects an arbitrary request Origin — combined with credentials this is exploitable.',
+          'CORS reflects the probe Origin without an exact Access-Control-Allow-Credentials: true value.',
           'Cookie "prefs" is missing the Secure flag.',
           'Cookie "prefs" is missing the HttpOnly flag.',
           'Cookie "prefs" has no SameSite attribute.',
@@ -131,6 +144,7 @@ describe('HttpService', () => {
       headers: {},
       technologies: [],
       transportError: 'socket reset',
+      bodyInspection: { status: 'not_read', error: null },
       securityAudit: {
         hsts: null,
         csp: null,
@@ -140,12 +154,9 @@ describe('HttpService', () => {
         permissionsPolicy: null,
         cookies: [],
         corsAllowOrigin: null,
+        corsAllowCredentials: null,
         corsReflectsOrigin: false,
-        findings: [
-          'Content-Security-Policy is not set.',
-          'No clickjacking protection (X-Frame-Options or CSP frame-ancestors).',
-          'X-Content-Type-Options: nosniff is not set.',
-        ],
+        findings: [],
       },
     });
   });
@@ -173,7 +184,7 @@ describe('HttpService', () => {
 
     await expect(pending).resolves.toMatchObject({
       finalStatus: 0,
-      transportError: 'The operation was aborted',
+      transportError: 'Probe exceeded its 1000 ms budget.',
     });
   });
 
@@ -344,7 +355,7 @@ describe('HttpService', () => {
     await vi.runAllTimersAsync();
     expect(await pending).toMatchObject({
       finalStatus: 0,
-      transportError: 'The operation was aborted',
+      transportError: 'Probe exceeded its 1000 ms budget.',
       bodyInspection: { status: 'not_read', error: null },
       redirectChain: [
         { url: 'https://example.com', status: 302, location: '/next' },
@@ -462,6 +473,93 @@ describe('HttpService', () => {
     expect(result.securityAudit.cookies).toEqual([
       { name: 'session', secure: true, httpOnly: true, sameSite: 'Lax' },
     ]);
+  });
+
+  it.each(['true', 'True', 'true, true', null])(
+    'reports reflected origin with credentials value %s',
+    async (credentials) => {
+      const headers = new Headers({
+        'access-control-allow-origin': 'https://attack-surface-probe.example',
+      });
+      if (credentials !== null) headers.set('access-control-allow-credentials', credentials);
+      fetchMock.mockResolvedValue(new Response(null, { headers }));
+      const result = await new HttpService('test').probe(
+        'https://example.com',
+        undefined,
+        1_000,
+        createMockContext(),
+      );
+      expect(result.securityAudit).toMatchObject({
+        corsAllowCredentials: credentials,
+        corsReflectsOrigin: true,
+      });
+      expect(result.securityAudit.findings).toContain(
+        credentials === 'true'
+          ? 'CORS reflects the probe Origin and sends Access-Control-Allow-Credentials: true.'
+          : 'CORS reflects the probe Origin without an exact Access-Control-Allow-Credentials: true value.',
+      );
+    },
+  );
+
+  it.each([true, false])(
+    'audits wildcard CORS with exact credentials true: %s',
+    async (enabled) => {
+      const headers = new Headers({ 'access-control-allow-origin': '*' });
+      if (enabled) headers.set('access-control-allow-credentials', 'true');
+      fetchMock.mockResolvedValue(new Response(null, { headers }));
+      const result = await new HttpService('test').probe(
+        'https://example.com',
+        undefined,
+        1_000,
+        createMockContext(),
+      );
+      expect(result.securityAudit.findings).toContain(
+        'CORS allows any origin for requests without credentials (Access-Control-Allow-Origin: *).',
+      );
+      expect(
+        result.securityAudit.findings.includes(
+          'Browsers reject Access-Control-Allow-Origin: * with Access-Control-Allow-Credentials: true for requests with credentials mode include.',
+        ),
+      ).toBe(enabled);
+    },
+  );
+
+  it.each([
+    ['http://example.com', 'https://example.com/', false],
+    ['https://example.com', 'http://example.com/', true],
+  ])(
+    'audits the final response scheme after %s redirects to %s',
+    async (url, location, plainHttp) => {
+      fetchMock
+        .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location } }))
+        .mockResolvedValueOnce(new Response(null));
+      const result = await new HttpService('test').probe(
+        url,
+        undefined,
+        1_000,
+        createMockContext(),
+      );
+      expect(result.finalUrl).toBe(location);
+      expect(result.securityAudit.findings.includes('Final response served over plain HTTP.')).toBe(
+        plainHttp,
+      );
+    },
+  );
+
+  it('retains a literal __proto__ header when collecting response evidence', async () => {
+    const response = new Response(null, { headers: [['__proto__', 'literal evidence']] });
+    expect(response.headers.get('__proto__')).toBe('literal evidence');
+    fetchMock.mockResolvedValue(response);
+    const result = await new HttpService('test').probe(
+      'https://example.com',
+      undefined,
+      1_000,
+      createMockContext(),
+    );
+    expect(Object.hasOwn(result.headers, '__proto__')).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(result.headers, '__proto__')?.value).toBe(
+      'literal evidence',
+    );
   });
 
   it('rejects prefix cookie attributes and reports SameSite None without Secure', async () => {

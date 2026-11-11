@@ -3,6 +3,7 @@
  * @module tests/integration/probe-http.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -62,7 +63,7 @@ describe('attacksurface_probe_http', () => {
         expect.objectContaining({ name: 'WordPress', version: '6.8', category: 'cms' }),
       ],
     });
-    const blocks = probeHttpTool.format?.(result);
+    const blocks = probeHttpTool.format?.(probeHttpTool.output.parse(result));
     expect(blocks?.[0]).toMatchObject({ type: 'text' });
     if (blocks?.[0]?.type === 'text') {
       expect(blocks[0].text).toContain('Final status:** 200');
@@ -88,6 +89,129 @@ describe('attacksurface_probe_http', () => {
     expect(
       probeHttpTool.input.safeParse({ url: 'https://example.com', timeoutMs: 30_000 }).success,
     ).toBe(true);
+  });
+
+  it.each(['example.com', 'example.com/path', 'https://['])(
+    'reports invalid_url for %s before a request',
+    async (url) => {
+      const result = await runToolContract(probeHttpTool, { url });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: {
+            reason: 'invalid_url',
+            recovery: { hint: expect.stringContaining('https://example.com') },
+          },
+        },
+      });
+      const text = JSON.stringify(result.content);
+      expect(text).toContain('reason invalid_url');
+      expect(text).toContain('https://example.com');
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['https://example.com', 'https:example.com'])('accepts %s', async (url) => {
+    fetchMock.mockResolvedValue(new Response(null));
+    const result = await runToolContract(probeHttpTool, { url });
+    expect(result.structuredContent).toMatchObject({ finalStatus: 200, transportError: null });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('preserves a literal __proto__ response header through the wire result', async () => {
+    const response = new Response(null, { headers: [['__proto__', 'literal evidence']] });
+    expect(response.headers.get('__proto__')).toBe('literal evidence');
+    fetchMock.mockResolvedValue(response);
+    const result = await runToolContract(probeHttpTool, { url: 'https://example.com' });
+    expect(result.isError).not.toBe(true);
+    expect(JSON.stringify(result.structuredContent)).toContain('"__proto__":"literal evidence"');
+    expect(JSON.stringify(result.content)).toContain('`__proto__`: `literal evidence`');
+  });
+
+  it('advertises and validates response headers as a string record', () => {
+    const headers = probeHttpTool.output.shape.headers;
+    const jsonSchema = z.toJSONSchema(headers);
+    expect(jsonSchema).toMatchObject({
+      type: 'object',
+      additionalProperties: { type: 'string' },
+      propertyNames: { type: 'string' },
+    });
+    expect(headers.safeParse(null).success).toBe(false);
+    expect(headers.safeParse(['header']).success).toBe(false);
+    expect(headers.safeParse({ 'x-example': 1 }).success).toBe(false);
+    expect(headers.safeParse(Object.fromEntries([['__proto__', 1]])).success).toBe(false);
+  });
+
+  it('reports a pre-header deadline with unobserved audit evidence on both surfaces', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockImplementation(() => new Promise(() => {}));
+    const pending = runToolContract(probeHttpTool, {
+      url: 'http://example.com',
+      timeoutMs: 1_000,
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    const result = await pending;
+    expect(result.structuredContent).toMatchObject({
+      finalStatus: 0,
+      transportError: 'Probe exceeded its 1000 ms budget.',
+      bodyInspection: { status: 'not_read', error: null },
+      securityAudit: {
+        hsts: null,
+        csp: null,
+        corsAllowOrigin: null,
+        corsAllowCredentials: null,
+        corsReflectsOrigin: false,
+        cookies: [],
+        findings: [],
+      },
+    });
+    const text = JSON.stringify(result.content);
+    expect(text).toContain('Probe exceeded its 1000 ms budget.');
+    expect(text).toContain('HSTS:** `not observed`');
+    expect(text).toContain('CORS Allow-Credentials:** `not observed`');
+    expect(text).toContain('reflects probe origin: not observed');
+    expect(text).toContain('Cookies:**\\n  - (not observed)');
+    expect(text).not.toContain('Final response served over plain HTTP.');
+  });
+
+  it('retains final plain HTTP and credential evidence when body reading times out', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValue(
+      new Response(new ReadableStream(), {
+        status: 404,
+        headers: {
+          server: 'Caddy',
+          'access-control-allow-origin': 'https://attack-surface-probe.example',
+          'access-control-allow-credentials': 'true',
+        },
+      }),
+    );
+    const pending = runToolContract(probeHttpTool, {
+      url: 'http://example.com',
+      timeoutMs: 1_000,
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    const result = await pending;
+    expect(result.structuredContent).toMatchObject({
+      finalStatus: 404,
+      transportError: null,
+      bodyInspection: { status: 'failed', error: 'Probe exceeded its 1000 ms budget.' },
+      securityAudit: {
+        corsAllowCredentials: 'true',
+        corsReflectsOrigin: true,
+        findings: expect.arrayContaining([
+          'Final response served over plain HTTP.',
+          'CORS reflects the probe Origin and sends Access-Control-Allow-Credentials: true.',
+        ]),
+      },
+      technologies: [{ name: 'Caddy' }],
+    });
+    const text = JSON.stringify(result.content);
+    expect(text).toContain('Probe exceeded its 1000 ms budget.');
+    expect(text).toContain('CORS Allow-Credentials:** `true`');
+    expect(text).toContain('Final response served over plain HTTP.');
+    expect(text).toContain('HSTS:** `absent`');
   });
 
   it.each([
@@ -120,6 +244,27 @@ describe('attacksurface_probe_http', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each(['ftp://example.com', 'http://127.0.0.1'])(
+    'retains blocked_target for %s on both error surfaces',
+    async (url) => {
+      vi.stubEnv('ATTACKSURFACE_ALLOW_PRIVATE_TARGETS', 'false');
+      const result = await runToolContract(probeHttpTool, { url });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.Forbidden,
+          data: {
+            reason: 'blocked_target',
+            recovery: { hint: expect.stringContaining('public http(s) URLs') },
+          },
+        },
+      });
+      expect(JSON.stringify(result.content)).toContain('reason blocked_target');
+      expect(JSON.stringify(result.content)).toContain('public http(s) URLs');
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
   it('returns a shaped transport error and enriches it with recovery guidance', async () => {
     fetchMock.mockRejectedValue(new Error('ECONNRESET'));
     const ctx = context();
@@ -144,6 +289,8 @@ describe('attacksurface_probe_http', () => {
     expect(result.structuredContent).toMatchObject({
       finalStatus: 0,
       transportError: 'Exceeded 10 redirects without a final response.',
+      bodyInspection: { status: 'not_read', error: null },
+      securityAudit: { findings: [], cookies: [], corsAllowCredentials: null },
       redirectChain: expect.arrayContaining([
         { url: 'https://example.com', status: 302, location: '/again' },
       ]),
@@ -152,6 +299,7 @@ describe('attacksurface_probe_http', () => {
       'Exceeded 10 redirects without a final response.',
     );
     expect(JSON.stringify(result.content)).toContain('Could not complete the probe');
+    expect(JSON.stringify(result.content)).toContain('HSTS:** `not observed`');
   });
 
   it.each(['complete', 'limited', 'failed'])(
