@@ -309,7 +309,7 @@ describe('attacksurface_map_domain', () => {
     expect(rendered).toContain('`*active*`');
     expect(rendered).toContain('`abuse@example.net`');
     expect(
-      fetchMock.mock.calls.filter(([url]) => String(url).startsWith('https://rdap.org')),
+      fetchMock.mock.calls.filter(([url]) => new URL(String(url)).origin === 'https://rdap.org'),
     ).toEqual([['https://rdap.org/domain/example.com', expect.any(Object)]]);
   });
 
