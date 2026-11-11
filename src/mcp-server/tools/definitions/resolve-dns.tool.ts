@@ -29,7 +29,7 @@ const ResolverResultSchema = z
       .string()
       .nullable()
       .describe(
-        'First resolver failure, including SERVFAIL or timeout; null for successful or absent records.',
+        'First query failure for this resolver, including SERVFAIL or timeout. Null if all queries succeeded or returned no records.',
       ),
   })
   .describe("One resolver's answer for a host.");
@@ -45,7 +45,9 @@ const ReverseResultSchema = z
 const HostResultSchema = z
   .object({
     host: z.string().describe('Host queried.'),
-    resolved: z.boolean().describe('True when the host resolved to at least one A/AAAA address.'),
+    resolved: z
+      .boolean()
+      .describe('True when an address query to the first resolver returned an address.'),
     records: z
       .record(z.string(), z.array(z.string()))
       .describe(
@@ -62,14 +64,14 @@ const HostResultSchema = z
     hostError: z
       .string()
       .nullable()
-      .describe('First resolver failure or host-level error (e.g. blocked target), or null.'),
+      .describe('First resolver failure or host-level error, or null.'),
   })
   .describe('Aggregate DNS result for one host across all queried resolvers.');
 
 export const resolveDnsTool = tool('attacksurface_resolve_dns', {
   title: 'attacksurface_resolve_dns',
   description:
-    'Resolve and enumerate DNS records (A, AAAA, CNAME, MX, NS, TXT, CAA) for one or more hosts across multiple public resolvers, with optional reverse DNS (PTR) for resolved IPs. Reports per-resolver values so propagation gaps and split-horizon DNS are visible. Each host is checked against an SSRF guard; one failing host degrades to a per-host error rather than failing the whole call.',
+    'Resolve DNS records (A, AAAA, CNAME, MX, NS, TXT, CAA) for one or more hosts with explicit resolvers. Compare per-resolver values for propagation gaps. The first resolver supplies address and optional PTR evidence, including addresses outside public ranges. Resolver IPs are checked before use; host query failures are reported per host.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
   input: z.object({
     hosts: z
@@ -80,7 +82,9 @@ export const resolveDnsTool = tool('attacksurface_resolve_dns', {
     recordTypes: z
       .array(RecordTypeEnum)
       .optional()
-      .describe('Record types to query. Omit for all of A/AAAA/CNAME/MX/NS/TXT/CAA.'),
+      .describe(
+        'Record types to report. Omit for all types. When both A and AAAA are omitted from a nonempty selection, the first resolver checks both to determine resolved and optional PTR results.',
+      ),
     resolvers: z
       .array(z.string().describe('Public resolver IP (e.g. "8.8.8.8").'))
       .optional()
@@ -90,7 +94,9 @@ export const resolveDnsTool = tool('attacksurface_resolve_dns', {
     reverse: z
       .boolean()
       .default(false)
-      .describe('When true, also perform reverse DNS (PTR) on resolved A/AAAA addresses.'),
+      .describe(
+        'When true, query PTR with the first resolver for each distinct address it returned.',
+      ),
   }),
   output: z.object({
     results: z.array(HostResultSchema).describe('Per-host DNS results.'),
@@ -166,16 +172,18 @@ export const resolveDnsTool = tool('attacksurface_resolve_dns', {
       types,
       resolvers,
       input.reverse,
+      undefined,
+      ctx.signal,
     );
 
     const anyResolved = results.some((r) => r.resolved);
     if (results.some((r) => r.hostError)) {
       ctx.enrich.notice(
-        'Some DNS lookups failed; successful records are retained. Inspect hostError and queryError. Retry resolver failures with another public resolver; blocked targets require a permitted target.',
+        'Some DNS lookups failed. Inspect hostError and queryError. Retry with another public resolver.',
       );
     } else if (!anyResolved) {
       ctx.enrich.notice(
-        "No host resolved to an address in the first configured resolver's canonical records. Check the requested record types and per-resolver answers; the hostnames or address records may not exist.",
+        'No host resolved to an address in the address queries made with the first resolver. Check the selected address record types and per-resolver answers.',
       );
     }
 

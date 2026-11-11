@@ -11,6 +11,8 @@ const dnsBoundary = vi.hoisted(() => ({ lookup: vi.fn(), resolve: vi.fn() }));
 vi.mock('node:dns/promises', () => ({
   lookup: dnsBoundary.lookup,
   Resolver: class FakeResolver {
+    setServers() {}
+
     resolve4(host: string) {
       return dnsBoundary.resolve('A', host);
     }
@@ -151,7 +153,7 @@ describe('attacksurface_enumerate_subdomains', () => {
     });
   });
 
-  it('re-resolves examined but undelivered records and permits a complete oversized record', async () => {
+  it('returns complete long records and continues past the entire examined prefix', async () => {
     const names = ['a.example.com', 'b.example.com', 'c.example.com'];
     fetchMock.mockImplementation(async () => Response.json([{ name_value: names.join('\n') }]));
     dnsBoundary.resolve.mockImplementation(async (type, host) =>
@@ -165,35 +167,36 @@ describe('attacksurface_enumerate_subdomains', () => {
     const first = await runToolContract(enumerateSubdomainsTool, {
       domain: 'example.com',
       sources: ['crt.sh'],
+      limit: 2,
     });
     expect(first.structuredContent).toMatchObject({
-      examinedCount: 3,
-      returnedCount: 1,
-      nextOffset: 1,
-      oversize: false,
-    });
-    expect(
-      Buffer.byteLength(
-        JSON.stringify({ structuredContent: first.structuredContent, content: first.content }),
-      ),
-    ).toBeLessThanOrEqual(24000);
-    dnsBoundary.resolve.mockClear();
-    const second = await runToolContract(enumerateSubdomainsTool, {
-      domain: 'example.com',
-      sources: ['crt.sh'],
-      offset: 1,
-    });
-    expect(second.structuredContent).toMatchObject({
       examinedCount: 2,
-      returnedCount: 1,
+      returnedCount: 2,
       nextOffset: 2,
-      oversize: true,
+      remainingCount: 1,
     });
-    expect(dnsBoundary.resolve).toHaveBeenCalledWith('A', names[1]);
-    expect(JSON.stringify(second.content)).toContain('oversized');
-    expect(enumerateSubdomainsTool.output.parse(second.structuredContent).subdomains).toHaveLength(
-      1,
-    );
+    const page = enumerateSubdomainsTool.output.parse(first.structuredContent);
+    expect(first.structuredContent).not.toHaveProperty('oversize');
+    expect(page.subdomains[1]?.addresses).toHaveLength(4000);
+    expect(JSON.stringify(first.content)).toContain(page.subdomains[1]?.addresses.join(', '));
+    expect(JSON.stringify(first.content)).toContain('nextOffset=2');
+    dnsBoundary.resolve.mockClear();
+    const args = enumerateSubdomainsTool.input.parse(page.continuation?.args);
+    const second = await runToolContract(enumerateSubdomainsTool, args);
+    expect(second.structuredContent).toMatchObject({
+      examinedCount: 1,
+      returnedCount: 1,
+      nextOffset: null,
+      remainingCount: 0,
+      continuation: null,
+    });
+    expect(dnsBoundary.resolve.mock.calls.filter(([type]) => type === 'A')).toEqual([
+      ['A', names[2]],
+    ]);
+    const last = enumerateSubdomainsTool.output.parse(second.structuredContent);
+    expect(last.subdomains[0]?.addresses).toHaveLength(4000);
+    expect(JSON.stringify(second.content)).toContain(last.subdomains[0]?.addresses.join(', '));
+    expect(JSON.stringify(second.content)).toContain('nextOffset=null');
   });
 
   it('returns normalized provenance and liveness with complete structured/format output', async () => {

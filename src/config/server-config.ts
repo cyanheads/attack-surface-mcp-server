@@ -5,10 +5,13 @@
  * @module config/server-config
  */
 
+import { isIP } from 'node:net';
 import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
+import { configurationError } from '@cyanheads/mcp-ts-core/errors';
 
 const DEFAULT_RESOLVERS = '8.8.8.8,1.1.1.1,9.9.9.9';
+const RESOLVER_ENV = 'ATTACKSURFACE_DEFAULT_RESOLVERS';
 const DEFAULT_USER_AGENT =
   'attack-surface-mcp-server/passive-recon (+https://github.com/cyanheads/attack-surface-mcp-server)';
 
@@ -20,10 +23,14 @@ const ServerConfigSchema = z.object({
     .string()
     .optional()
     .describe('Certspotter API key for higher CT-fallback rate limits.'),
-  /** Comma-separated public resolver IPs used by `attacksurface_resolve_dns` by default. */
+  /** Explicit resolver IPs used by DNS tools, discovery and connection safety checks. */
   defaultResolvers: z
     .string()
     .default(DEFAULT_RESOLVERS)
+    .refine((raw) => {
+      const ips = parseResolverList(raw);
+      return ips.length > 0 && ips.every((ip) => isIP(ip) !== 0 && !ip.includes('%'));
+    }, 'Provide at least one valid DNS resolver IP.')
     .describe('Comma-separated default DNS resolver IPs.'),
   /** Default User-Agent for `attacksurface_probe_http` (overridable per call). */
   httpUserAgent: z
@@ -54,10 +61,15 @@ let _config: ServerConfig | undefined;
 
 /** Lazily parse and cache the server config from the environment. */
 export function getServerConfig(): ServerConfig {
+  // The framework normalizes empty environment values to undefined. An explicitly empty resolver
+  // list is a configuration error rather than permission to choose a different resolver.
+  if (process.env[RESOLVER_ENV]?.trim() === '') {
+    throw configurationError(`${RESOLVER_ENV} must contain at least one DNS resolver IP.`);
+  }
   _config ??= parseEnvConfig(ServerConfigSchema, {
     shodanApiKey: 'SHODAN_API_KEY',
     certspotterApiKey: 'CERTSPOTTER_API_KEY',
-    defaultResolvers: 'ATTACKSURFACE_DEFAULT_RESOLVERS',
+    defaultResolvers: RESOLVER_ENV,
     httpUserAgent: 'ATTACKSURFACE_HTTP_USER_AGENT',
     maxSubdomains: 'ATTACKSURFACE_MAX_SUBDOMAINS',
     rdapBootstrapUrl: 'ATTACKSURFACE_RDAP_BOOTSTRAP_URL',

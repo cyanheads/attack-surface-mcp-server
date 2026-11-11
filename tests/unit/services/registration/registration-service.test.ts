@@ -21,6 +21,7 @@ const netBoundary = vi.hoisted(() => ({
 }));
 const ssrfBoundary = vi.hoisted(() => ({
   assertSafeUrl: vi.fn<(rawUrl: string, signal?: AbortSignal) => Promise<void>>(),
+  resolveSafeHost: vi.fn<(host: string, signal?: AbortSignal) => Promise<string | null>>(),
 }));
 
 vi.mock('node:net', async () => {
@@ -31,7 +32,7 @@ vi.mock('node:net', async () => {
 vi.mock('@/utils/ssrf-guard.js', async () => {
   const actual =
     await vi.importActual<typeof import('@/utils/ssrf-guard.js')>('@/utils/ssrf-guard.js');
-  return { ...actual, assertSafeUrl: ssrfBoundary.assertSafeUrl };
+  return { ...actual, ...ssrfBoundary };
 });
 
 import {
@@ -116,6 +117,8 @@ describe('RegistrationService', () => {
     vi.stubGlobal('fetch', fetchMock);
     ssrfBoundary.assertSafeUrl.mockReset();
     ssrfBoundary.assertSafeUrl.mockResolvedValue();
+    ssrfBoundary.resolveSafeHost.mockReset();
+    ssrfBoundary.resolveSafeHost.mockResolvedValue(null);
     netBoundary.createConnection.mockReset();
     netBoundary.scenarios.length = 0;
     netBoundary.createConnection.mockImplementation(() => {
@@ -485,6 +488,132 @@ describe('RegistrationService', () => {
       nameservers: ['ns1.example.com'],
       dnssecSigned: true,
     });
+  });
+
+  it.each([
+    [
+      [
+        'NetRange: 8.0.0.0 - 8.255.255.255\r\nOrgId: PARENT\r\nOrgName: Parent Org\r\nOrgAbuseEmail: parent@example.net',
+        'NetRange: 8.8.8.0 - 8.8.8.255\r\nOrgId: CHILD',
+        'OrgName: *Child Org*\r\nOrgId: CHILD\r\nOrgAbuseHandle: ABUSE-CHILD',
+        'OrgAbuseHandle: ABUSE-CHILD\r\nOrgAbuseEmail: child@example.net',
+      ],
+      { organization: '*Child Org*', abuseContact: { email: 'child@example.net' } },
+    ],
+    [
+      [
+        'inetnum: 8.8.8.0 - 8.8.8.255\r\norg: ORG-EXAMPLE',
+        'organisation: ORG-EXAMPLE\r\norg-name: Example Org\r\nabuse-c: EXAMPLE-ABUSE',
+        'role: Unrelated\r\nnic-hdl: UNRELATED\r\nabuse-mailbox: wrong@example.net',
+        'role: Example Abuse\r\nnic-hdl: EXAMPLE-ABUSE\r\nabuse-mailbox: report@example.net',
+      ],
+      { organization: 'Example Org', abuseContact: { email: 'report@example.net' } },
+    ],
+    [
+      [
+        'inetnum: 8.8.8.0 - 8.8.8.255\r\norg-name: REDACTED FOR PRIVACY\r\nabuse-mailbox: \t',
+        'role: Unrelated\r\nnic-hdl: UNRELATED\r\nabuse-mailbox: wrong@example.net',
+      ],
+      {},
+    ],
+  ])('attributes WHOIS fields from allocation and linked objects (%#)', async (objects, fields) => {
+    const whois = objects.join('\r\n\r\n');
+    fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
+    netBoundary.scenarios.push(
+      { mode: 'success', chunks: ['refer: whois.registry.test\n'] },
+      { mode: 'success', chunks: [whois] },
+    );
+    const result = await new RegistrationService(config).lookup(
+      '8.8.8.8',
+      'ip',
+      createMockContext(),
+    );
+    const actual = Object.fromEntries(
+      Object.entries(result.registration).filter(
+        ([key]) => key === 'organization' || key === 'abuseContact',
+      ),
+    );
+    expect(actual).toEqual(fields);
+    expect(result.rawWhois).toBe(whois);
+  });
+
+  it.each([
+    ['OriginAS: 15169', [15169]],
+    ['origin: AS15169', [15169]],
+    ['OriginAS: A15169', []],
+  ])('reads WHOIS origin ASNs from %s', async (line, expected) => {
+    fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
+    netBoundary.scenarios.push(
+      { mode: 'success', chunks: ['refer: whois.registry.test\n'] },
+      { mode: 'success', chunks: [`NetName: Example\n${line}\n`] },
+    );
+    const result = await new RegistrationService(config).lookup(
+      '8.8.8.8',
+      'ip',
+      createMockContext(),
+    );
+    expect(result.registration).toMatchObject({ originAsns: expected });
+    expect(result.rawWhois).toContain(line);
+  });
+
+  it('uses the same WHOIS deadline for hostname validation and the socket', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
+    ssrfBoundary.resolveSafeHost.mockImplementationOnce(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 7_000));
+      return '93.184.216.34';
+    });
+    netBoundary.scenarios.push({ mode: 'timeout' });
+    const pending = new RegistrationService(config).lookup(
+      'example.com',
+      'domain',
+      createMockContext(),
+    );
+    const settled = vi.fn();
+    const observed = pending.catch(settled);
+    await vi.advanceTimersByTimeAsync(8_000);
+    try {
+      expect(settled).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: { reason: 'source_unavailable' },
+          message: expect.stringContaining('WHOIS whois.iana.org timed out'),
+        }),
+      );
+      expect(netBoundary.createConnection).toHaveBeenCalledExactlyOnceWith(43, '93.184.216.34');
+    } finally {
+      await vi.runAllTimersAsync();
+      await observed;
+    }
+  });
+
+  it('passes caller cancellation into WHOIS hostname validation and starts no socket', async () => {
+    fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
+    const controller = new AbortController();
+    const cancelled = new DOMException('Caller cancelled', 'AbortError');
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    ssrfBoundary.resolveSafeHost.mockImplementationOnce(async (_host, signal) => {
+      entered();
+      if (!signal) return null;
+      return new Promise((_, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    });
+    const pending = new RegistrationService(config).lookup(
+      'example.com',
+      'domain',
+      createMockContext({ signal: controller.signal }),
+    );
+    await started;
+    controller.abort(cancelled);
+    await expect(pending).rejects.toBe(cancelled);
+    expect(ssrfBoundary.resolveSafeHost).toHaveBeenCalledExactlyOnceWith(
+      'whois.iana.org',
+      expect.any(AbortSignal),
+    );
+    expect(netBoundary.createConnection).not.toHaveBeenCalled();
   });
 
   it('times out a WHOIS fallback that never answers', async () => {

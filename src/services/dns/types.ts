@@ -35,13 +35,13 @@ export interface ReverseResult {
 export interface HostDnsResult {
   /** The host queried. */
   host: string;
-  /** First resolver failure or host-level error (e.g. SSRF rejection), or null. */
+  /** First resolver failure or host-level error, or null. */
   hostError: string | null;
   /** Record types where resolvers disagreed. */
   propagationMismatches: DnsRecordType[];
   /** Records from the first configured resolver (canonical view), even if its queries failed. */
   records: Partial<Record<DnsRecordType, string[]>>;
-  /** Whether the host resolved to at least one A/AAAA address. */
+  /** Whether the first resolver returned at least one address in the address queries performed. */
   resolved: boolean;
   /** Per-resolver breakdown, surfacing propagation gaps. */
   resolverResults: ResolverResult[];

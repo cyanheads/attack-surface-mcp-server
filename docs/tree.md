@@ -1,6 +1,6 @@
 # attack-surface-mcp-server - Directory Structure
 
-Generated on: 2026-10-30 09:16:40
+Generated on: 2026-11-11 12:01:10
 
 ```text
 attack-surface-mcp-server/
@@ -153,24 +153,26 @@ attack-surface-mcp-server/
 │   │   │       ├── index.ts
 │   │   │       └── surface.resource.ts
 │   │   └── tools/
-│   │       └── definitions/
-│   │           ├── enumerate-subdomains.tool.ts
-│   │           ├── index.ts
-│   │           ├── inspect-tls.tool.ts
-│   │           ├── lookup-host.tool.ts
-│   │           ├── lookup-registration.tool.ts
-│   │           ├── map-domain.tool.ts
-│   │           ├── probe-http.tool.ts
-│   │           ├── recon-guidance.fuzz.test.ts
-│   │           ├── recon-guidance.tool.test.ts
-│   │           ├── recon-guidance.tool.ts
-│   │           ├── resolve-dns.tool.test.ts
-│   │           └── resolve-dns.tool.ts
+│   │       ├── definitions/
+│   │       │   ├── enumerate-subdomains.tool.ts
+│   │       │   ├── index.ts
+│   │       │   ├── inspect-tls.tool.ts
+│   │       │   ├── lookup-host.tool.ts
+│   │       │   ├── lookup-registration.tool.ts
+│   │       │   ├── map-domain.tool.ts
+│   │       │   ├── probe-http.tool.ts
+│   │       │   ├── recon-guidance.fuzz.test.ts
+│   │       │   ├── recon-guidance.tool.test.ts
+│   │       │   ├── recon-guidance.tool.ts
+│   │       │   ├── resolve-dns.tool.test.ts
+│   │       │   └── resolve-dns.tool.ts
+│   │       └── registration-abuse-contact.ts
 │   ├── services/
 │   │   ├── ct/
 │   │   │   ├── ct-service.ts
 │   │   │   └── types.ts
 │   │   ├── dns/
+│   │   │   ├── configured-resolver.ts
 │   │   │   ├── dns-service.ts
 │   │   │   └── types.ts
 │   │   ├── http/
@@ -180,9 +182,12 @@ attack-surface-mcp-server/
 │   │   │   └── types.ts
 │   │   ├── registration/
 │   │   │   ├── allocations.ts
+│   │   │   ├── attribution-value.ts
+│   │   │   ├── rdap-attribution.ts
 │   │   │   ├── registration-service.test.ts
 │   │   │   ├── registration-service.ts
-│   │   │   └── types.ts
+│   │   │   ├── types.ts
+│   │   │   └── whois-attribution.ts
 │   │   ├── shodan/
 │   │   │   ├── shodan-service.ts
 │   │   │   └── types.ts
@@ -193,7 +198,6 @@ attack-surface-mcp-server/
 │   │   ├── discovery.ts
 │   │   ├── literal-text.ts
 │   │   ├── next-call.ts
-│   │   ├── response-budget.ts
 │   │   ├── ssrf-guard.test.ts
 │   │   ├── ssrf-guard.ts
 │   │   ├── validation.test.ts
@@ -208,6 +212,7 @@ attack-surface-mcp-server/
 │   │   └── tls-service.fuzz.test.ts
 │   ├── integration/
 │   │   ├── bounded-guidance.test.ts
+│   │   ├── ct-retry-guidance.test.ts
 │   │   ├── enumerate-subdomains.tool.test.ts
 │   │   ├── inspect-tls.tool.test.ts
 │   │   ├── literal-evidence.test.ts
@@ -228,7 +233,8 @@ attack-surface-mcp-server/
 │   └── unit/
 │       ├── services/
 │       │   ├── ct/
-│       │   │   └── ct-service.test.ts
+│       │   │   ├── ct-service.test.ts
+│       │   │   └── retry-budget.test.ts
 │       │   ├── dns/
 │       │   │   └── dns-service.test.ts
 │       │   ├── http/

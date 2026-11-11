@@ -35,8 +35,11 @@ import {
 } from '@/utils/discovery.js';
 import { literalText } from '@/utils/literal-text.js';
 import { NextCallSchema } from '@/utils/next-call.js';
-import { RESPONSE_BYTE_TARGET, responseBytes } from '@/utils/response-budget.js';
 import { isValidDomain, normalizeDomain } from '@/utils/validation.js';
+import {
+  formatRegistrationAbuseContact,
+  RegistrationAbuseContactSchema,
+} from '../registration-abuse-contact.js';
 import type { FindingHostSchema } from './recon-guidance.tool.js';
 
 const LiveHostSchema = z
@@ -128,6 +131,9 @@ const LiveHostSchema = z
 const RegistrationSummarySchema = z.object({
   source: z.enum(['rdap', 'whois']).describe('Source that answered.'),
   registrar: z.string().optional().describe('Registrar (domain lookups).'),
+  registrarAbuseContact: RegistrationAbuseContactSchema.optional().describe(
+    'Abuse contact disclosed for the registrar.',
+  ),
   statuses: z.array(z.string()).describe('Registry status codes.'),
   expiry: z.string().optional().describe('Expiration date when present.'),
   nameservers: z.array(z.string()).describe('Nameservers (domain lookups).'),
@@ -196,9 +202,7 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
         omittedHosts: z.array(z.string()).describe('Exact eligible suffix to submit separately.'),
       })
       .describe('Guidance handoff coverage, separate from map discovery coverage.'),
-    guidanceNotice: z
-      .string()
-      .describe('How to submit omitted hosts, including byte-target exceptions.'),
+    guidanceNotice: z.string().describe('Handoff coverage and how to submit omitted hosts.'),
   }),
   enrichment: {
     truncated: z.boolean().optional().describe('True when subdomain resolution was capped.'),
@@ -429,10 +433,18 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
       const r = result.registration;
       lines.push('## Registration');
       lines.push(`- **Source:** ${r.source}`);
-      if (r.registrar) lines.push(`- **Registrar:** ${r.registrar}`);
-      if (r.expiry) lines.push(`- **Expiry:** ${r.expiry}`);
-      if (r.statuses.length > 0) lines.push(`- **Status:** ${r.statuses.join(', ')}`);
-      if (r.nameservers.length > 0) lines.push(`- **Nameservers:** ${r.nameservers.join(', ')}`);
+      if (r.registrar) lines.push(`- **Registrar:** ${literalText(r.registrar)}`);
+      if (r.registrarAbuseContact)
+        lines.push(
+          ...formatRegistrationAbuseContact('Registrar abuse contact', r.registrarAbuseContact).map(
+            (line) => `- ${line}`,
+          ),
+        );
+      if (r.expiry) lines.push(`- **Expiry:** ${literalText(r.expiry)}`);
+      if (r.statuses.length > 0)
+        lines.push(`- **Status:** ${r.statuses.map(literalText).join(', ')}`);
+      if (r.nameservers.length > 0)
+        lines.push(`- **Nameservers:** ${r.nameservers.map(literalText).join(', ')}`);
     }
 
     if (result.assessment.length > 0) {
@@ -531,6 +543,9 @@ function buildGuidanceHandoff(
         ...(certificateKnown && h.tls
           ? { certValidationAuthorized: h.tls.validationAuthorized }
           : {}),
+        ...(h.tls?.identityAuthorized != null
+          ? { certIdentityAuthorized: h.tls.identityAuthorized }
+          : {}),
         ...(h.http ? { missingSecurityHeaders } : {}),
         ...(technologies.length
           ? { technologies: technologies.map((t) => ({ name: t.name, version: t.version })) }
@@ -543,9 +558,11 @@ function buildGuidanceHandoff(
   const registrationExpiryDays = Number.isNaN(expiryTime)
     ? undefined
     : Math.floor((expiryTime - Date.now()) / 86_400_000);
-  const build = (count: number, oversize = false) => ({
+  const includedHosts = eligible.slice(0, 50);
+  const omittedHosts = eligible.slice(includedHosts.length).map((h) => h.host);
+  return {
     nextToolSuggestions:
-      count === 0
+      includedHosts.length === 0
         ? []
         : [
             {
@@ -555,7 +572,7 @@ function buildGuidanceHandoff(
                 topic: 'triage',
                 findings: {
                   domain,
-                  hosts: eligible.slice(0, count),
+                  hosts: includedHosts,
                   ...(registrationExpiryDays !== undefined ? { registrationExpiryDays } : {}),
                 },
               },
@@ -563,31 +580,16 @@ function buildGuidanceHandoff(
           ],
     guidanceCoverage: {
       eligibleCount: eligible.length,
-      includedCount: count,
-      omittedHosts: eligible.slice(count).map((h) => h.host),
+      includedCount: includedHosts.length,
+      omittedHosts,
     },
-    guidanceNotice: `Submit remaining map hosts separately to attacksurface_recon_guidance, preserving their evidence.${oversize ? ' One complete oversized host or required omission metadata exceeds the 24,000-byte incremental target.' : ''}`,
-  });
-  let count = 0;
-  for (let n = 1; n <= Math.min(50, eligible.length); n++) {
-    const candidate = build(n);
-    if (
-      responseBytes(candidate, [{ type: 'text', text: renderGuidanceHandoff(candidate) }]) >
-      RESPONSE_BYTE_TARGET
-    ) {
-      if (count === 0) count = n;
-      break;
-    }
-    count = n;
-  }
-  const result = build(count);
-  return responseBytes(result, [{ type: 'text', text: renderGuidanceHandoff(result) }]) >
-    RESPONSE_BYTE_TARGET
-    ? build(count, true)
-    : result;
+    guidanceNotice: omittedHosts.length
+      ? `Submit the ${omittedHosts.length} omitted host(s) separately to attacksurface_recon_guidance, preserving their evidence.`
+      : `Included all ${includedHosts.length} eligible host(s) in the guidance handoff.`,
+  };
 }
 
-/** Same complete handoff text is used for byte fitting and the map formatter. */
+/** Render the complete handoff, including its eligible-host coverage. */
 function renderGuidanceHandoff(result: {
   nextToolSuggestions: z.infer<typeof NextCallSchema>[];
   guidanceCoverage: { eligibleCount: number; includedCount: number; omittedHosts: string[] };
@@ -724,6 +726,7 @@ function summarizeRegistration(
     return {
       source,
       ...(reg.registrar ? { registrar: reg.registrar } : {}),
+      ...(reg.registrarAbuseContact && { registrarAbuseContact: reg.registrarAbuseContact }),
       statuses: reg.statuses,
       ...(expiry ? { expiry } : {}),
       nameservers: reg.nameservers,

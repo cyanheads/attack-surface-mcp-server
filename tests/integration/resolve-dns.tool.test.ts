@@ -3,15 +3,22 @@
  * @module tests/integration/resolve-dns.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const dnsBoundary = vi.hoisted(() => ({ lookup: vi.fn(), query: vi.fn(), reverse: vi.fn() }));
+const dnsBoundary = vi.hoisted(() => ({
+  cancel: vi.fn(),
+  lookup: vi.fn(),
+  query: vi.fn(),
+  reverse: vi.fn(),
+}));
 
 vi.mock('node:dns/promises', () => ({
   lookup: dnsBoundary.lookup,
   Resolver: class FakeResolver {
     private server = '';
+    cancel = dnsBoundary.cancel;
 
     setServers(servers: string[]) {
       this.server = servers[0] ?? '';
@@ -46,7 +53,7 @@ vi.mock('node:dns/promises', () => ({
     }
 
     reverse(ip: string) {
-      return dnsBoundary.reverse(ip);
+      return dnsBoundary.reverse(ip, this.server);
     }
   },
 }));
@@ -64,6 +71,7 @@ describe('attacksurface_resolve_dns', () => {
     vi.unstubAllEnvs();
     resetServerConfig();
     initDnsService();
+    dnsBoundary.cancel.mockReset();
     dnsBoundary.lookup.mockReset();
     dnsBoundary.query.mockReset();
     dnsBoundary.reverse.mockReset();
@@ -201,26 +209,84 @@ describe('attacksurface_resolve_dns', () => {
     expect(dnsBoundary.query).not.toHaveBeenCalled();
   });
 
-  it('returns a shaped per-host SSRF error without failing other results', async () => {
+  it('renders a configured private answer as DNS evidence on both surfaces', async () => {
     dnsBoundary.lookup.mockResolvedValue([{ address: '10.0.0.4', family: 4 }]);
-
-    const result = await resolveDnsTool.handler(
-      resolveDnsTool.input.parse({
-        hosts: ['internal.example.com'],
-        recordTypes: ['A'],
-        resolvers: ['8.8.8.8'],
-      }),
-      createMockContext({ errors: resolveDnsTool.errors }),
-    );
-
-    expect(result).toEqual(expect.schemaMatching(resolveDnsTool.output));
-    expect(result.results[0]).toMatchObject({
-      host: 'internal.example.com',
-      resolved: false,
-      records: {},
-      resolverResults: [],
-      hostError: expect.stringMatching(/^SSRF_BLOCKED:/),
+    dnsBoundary.query.mockResolvedValue(['10.0.0.9']);
+    const result = await runToolContract(resolveDnsTool, {
+      hosts: ['internal.example.com'],
+      recordTypes: ['A'],
+      resolvers: ['8.8.8.8'],
     });
+    expect(result.structuredContent).toMatchObject({
+      results: [{ resolved: true, records: { A: ['10.0.0.9'] }, hostError: null }],
+    });
+    expect(JSON.stringify(result.content)).toContain('10.0.0.9');
+    expect(JSON.stringify(result)).not.toContain('10.0.0.4');
+    expect(dnsBoundary.lookup).not.toHaveBeenCalled();
+  });
+
+  it('renders PTR and liveness for MX/TXT without exposing supplemental record types', async () => {
+    dnsBoundary.query.mockImplementation(async (type) => {
+      if (type === 'MX') return [{ priority: 0, exchange: '' }];
+      if (type === 'TXT') return [['v=spf1 -all']];
+      if (type === 'A') return ['93.184.216.34'];
+      return ['2606:4700:4700::1111'];
+    });
+    const result = await runToolContract(resolveDnsTool, {
+      hosts: ['example.com'],
+      recordTypes: ['MX', 'TXT'],
+      resolvers: ['1.1.1.1'],
+      reverse: true,
+    });
+    const records = { MX: ['0 .'], TXT: ['v=spf1 -all'] };
+    expect(result.structuredContent).toMatchObject({
+      results: [
+        {
+          resolved: true,
+          records,
+          resolverResults: [{ resolver: '1.1.1.1', records, queryError: null }],
+          reverse: [
+            { ip: '93.184.216.34', hostnames: ['ptr.example.com'], lookupError: null },
+            { ip: '2606:4700:4700::1111', hostnames: ['ptr.example.com'], lookupError: null },
+          ],
+        },
+      ],
+    });
+    const text = JSON.stringify(result.content);
+    expect(text).toContain('**Resolved:** yes');
+    expect(text).toContain('2606:4700:4700::1111');
+    expect(text).toContain('ptr.example.com');
+    expect(text).not.toContain('AAAA=');
+    expect(text).not.toContain('No host resolved');
+  });
+
+  it('cancels a pending PTR request through the handler signal', async () => {
+    const ready = Promise.withResolvers<void>();
+    const ptr = Promise.withResolvers<string[]>();
+    dnsBoundary.query.mockResolvedValue(['93.184.216.34']);
+    dnsBoundary.reverse.mockImplementation(() => {
+      ready.resolve();
+      return ptr.promise;
+    });
+    dnsBoundary.cancel.mockImplementation(() => ptr.reject(dnsError('ECANCELLED')));
+    const controller = new AbortController();
+    const pending = runToolContract(
+      resolveDnsTool,
+      {
+        hosts: ['example.com'],
+        recordTypes: ['A'],
+        reverse: true,
+      },
+      { context: { signal: controller.signal } },
+    );
+    await ready.promise;
+    controller.abort(new DOMException('PTR cancelled by caller', 'AbortError'));
+    const result = await pending;
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.RequestCancelled },
+    });
+    expect(JSON.stringify(result.content)).toContain('PTR cancelled by caller');
+    expect(dnsBoundary.cancel).toHaveBeenCalledTimes(1);
   });
 
   it('enriches an all-unresolved result with guidance', async () => {

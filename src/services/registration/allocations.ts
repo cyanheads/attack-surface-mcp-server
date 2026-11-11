@@ -70,3 +70,31 @@ export function normalizeAllocation(value: string): string[] {
   }
   return out;
 }
+
+/** Size of the smallest supplied allocation covering the entire queried IP or CIDR. */
+export function coveringAllocationSize(value: string, target: string): bigint | undefined {
+  const [address = '', prefix] = target.split('/');
+  const family = isIP(address);
+  if (!family || !isValidRegistrationTarget(target)) return;
+  const width = family === 4 ? 32 : 128;
+  const hostBits = BigInt(prefix === undefined ? 0 : width - Number(prefix));
+  const queryStart = (addressValue(address, family) >> hostBits) << hostBits;
+  const queryEnd = queryStart + (1n << hostBits) - 1n;
+  let size: bigint | undefined;
+  for (const part of value.split(',')) {
+    const cidrs = normalizeAllocation(part);
+    const first = cidrs[0];
+    const last = cidrs.at(-1);
+    if (!first || !last) continue;
+    const [start = ''] = first.split('/');
+    const [end = '', endPrefix] = last.split('/');
+    if (isIP(start) !== family) continue;
+    const allocationStart = addressValue(start, family);
+    const allocationEnd =
+      addressValue(end, family) + (1n << BigInt(width - Number(endPrefix))) - 1n;
+    if (allocationStart > queryStart || allocationEnd < queryEnd) continue;
+    const span = allocationEnd - allocationStart + 1n;
+    if (size === undefined || span < size) size = span;
+  }
+  return size;
+}

@@ -149,7 +149,7 @@ describe('bounded guidance', () => {
     expect(JSON.stringify(results[2]?.priorities)).not.toContain('Renew now');
   });
 
-  it('walks independent pages without resetting exhausted collections and measures complete serialized surfaces', async () => {
+  it('fills independent pages without resetting exhausted collections', async () => {
     const findings = {
       hosts: Array.from({ length: 80 }, (_, i) => ({
         host: `h${i}.example.com`,
@@ -172,11 +172,11 @@ describe('bounded guidance', () => {
       });
       const output = reconGuidanceTool.output.parse(result.structuredContent);
       expect(output).toHaveProperty('limit', 50);
-      expect(
-        Buffer.byteLength(
-          JSON.stringify({ structuredContent: result.structuredContent, content: result.content }),
-        ),
-      ).toBeLessThanOrEqual(24000);
+      expect(output.priorities).toHaveLength(Math.min(50, 320 - priorityOffset));
+      expect(output.nextToolSuggestions).toHaveLength(Math.min(50, 160 - suggestionOffset));
+      expect(JSON.stringify(result.content)).toContain(
+        `priorityReturnedCount=${output.priorities.length}; suggestionReturnedCount=${output.nextToolSuggestions.length}`,
+      );
       expect(output.priorityTotal).toBe(320);
       expect(output.suggestionTotal).toBe(160);
       expect(output.priorityReturnedCount).toBe(output.priorities.length);
@@ -240,7 +240,7 @@ describe('bounded guidance', () => {
     });
   });
 
-  it('returns one complete oversized priority and an explicit advancing exception', async () => {
+  it('returns complete long priorities and suggestions on the same page', async () => {
     const literal = 'x'.repeat(30000);
     const result = await runToolContract(reconGuidanceTool, {
       findings: {
@@ -249,7 +249,78 @@ describe('bounded guidance', () => {
     });
     expect(JSON.stringify(result.structuredContent)).toContain(literal);
     expect(JSON.stringify(result.content)).toContain(literal);
-    expect(result.structuredContent).toMatchObject({ oversize: true });
-    expect(JSON.stringify(result.content)).toContain('oversized');
+    expect(result.structuredContent).toMatchObject({
+      priorityReturnedCount: 3,
+      suggestionReturnedCount: 1,
+      nextPriorityOffset: null,
+      nextSuggestionOffset: null,
+    });
+    expect(result.structuredContent).not.toHaveProperty('oversize');
+    expect(JSON.stringify(result.content)).toContain('attacksurface_probe_http');
+  });
+
+  it.each(['triage', 'posture'] as const)(
+    'reports identity independently of chain trust in %s',
+    async (topic) => {
+      for (const certValidationAuthorized of [true, false]) {
+        const result = await runToolContract(reconGuidanceTool, {
+          topic,
+          findings: {
+            hosts: [
+              {
+                host: 'wrong.example.com',
+                tlsProtocol: 'TLSv1.3',
+                certValidationAuthorized,
+                certIdentityAuthorized: false,
+                missingSecurityHeaders: [],
+              },
+            ],
+          },
+        });
+        const mismatch = {
+          severity: 'high',
+          finding: 'wrong.example.com: TLS certificate does not match the requested hostname.',
+          action: 'Deploy a certificate that covers the requested hostname.',
+        };
+        const output = reconGuidanceTool.output.parse(result.structuredContent);
+        expect(output.priorities).toContainEqual(mismatch);
+        expect(output.priorities).toHaveLength(certValidationAuthorized ? 1 : 2);
+        expect(
+          output.priorities.some(({ finding }) => finding.includes('chain did not validate')),
+        ).toBe(!certValidationAuthorized);
+        const text = JSON.stringify(result.content);
+        expect(text).toContain(mismatch.finding);
+        expect(text).toContain(mismatch.action);
+        expect(text.includes('chain did not validate')).toBe(!certValidationAuthorized);
+      }
+    },
+  );
+
+  it('counts matching identity as evidence and keeps mismatches out of coverage', async () => {
+    const matched = await runToolContract(reconGuidanceTool, {
+      topic: 'posture',
+      findings: { hosts: [{ host: 'example.com', certIdentityAuthorized: true }] },
+    });
+    expect(matched.structuredContent).toMatchObject({
+      priorities: [
+        { finding: 'No selected findings require action based on the supplied evidence.' },
+      ],
+    });
+    expect(JSON.stringify(matched.content)).toContain('No selected findings require action');
+    const coverage = await runToolContract(reconGuidanceTool, {
+      topic: 'coverage',
+      findings: {
+        hosts: [
+          {
+            host: 'wrong.example.com',
+            tlsProtocol: 'TLSv1.3',
+            certIdentityAuthorized: false,
+            missingSecurityHeaders: [],
+          },
+        ],
+      },
+    });
+    expect(coverage.structuredContent).toMatchObject({ priorities: [{ severity: 'info' }] });
+    expect(JSON.stringify(coverage.content)).not.toContain('does not match');
   });
 });

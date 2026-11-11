@@ -15,9 +15,22 @@ interface Scenario {
 }
 
 const tlsBoundary = vi.hoisted(() => ({ connect: vi.fn(), scenarios: [] as Scenario[] }));
+const dnsBoundary = vi.hoisted(() => ({ lookup: vi.fn() }));
 vi.mock('node:tls', async (original) => ({
   ...(await original<typeof import('node:tls')>()),
   connect: tlsBoundary.connect,
+}));
+vi.mock('node:dns/promises', () => ({
+  lookup: dnsBoundary.lookup,
+  Resolver: class {
+    setServers() {}
+    async resolve4() {
+      throw Object.assign(new Error('no public answer'), { code: 'ENOTFOUND' });
+    }
+    async resolve6() {
+      return [];
+    }
+  },
 }));
 
 import { inspectTlsTool } from '@/mcp-server/tools/definitions/inspect-tls.tool.js';
@@ -327,6 +340,29 @@ describe('attacksurface_inspect_tls', () => {
       ],
     });
     expect(JSON.stringify(result.content)).toContain('SSRF_BLOCKED');
+    expect(tlsBoundary.connect).not.toHaveBeenCalled();
+  });
+
+  it('returns the same public absence for internal-only and missing names on both surfaces', async () => {
+    vi.stubEnv('ATTACKSURFACE_ALLOW_PRIVATE_TARGETS', 'false');
+    dnsBoundary.lookup.mockImplementation(async (name) => {
+      if (name === 'internal.example.com') return [{ address: '10.0.0.4', family: 4 }];
+      throw Object.assign(new Error('missing system record'), { code: 'ENOTFOUND' });
+    });
+    const hosts = ['internal.example.com', 'absent.example.com'];
+    const result = await runToolContract(inspectTlsTool, { hosts });
+    const errors = hosts.map(
+      (host) => `Host "${host}" has no A or AAAA records from the configured resolver.`,
+    );
+    expect(result.structuredContent).toMatchObject({
+      results: errors.map((handshakeError) => ({ certificate: null, handshakeError })),
+    });
+    const text = result.content
+      ?.flatMap((block) => (block.type === 'text' ? [block.text] : []))
+      .join(' ');
+    for (const error of errors) expect(text).toContain(error);
+    expect(JSON.stringify(result)).not.toContain('10.0.0.4');
+    expect(dnsBoundary.lookup).not.toHaveBeenCalled();
     expect(tlsBoundary.connect).not.toHaveBeenCalled();
   });
 

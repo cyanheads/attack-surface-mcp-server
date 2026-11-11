@@ -21,7 +21,7 @@ const tlsBoundary = vi.hoisted(() => ({
   destroy: vi.fn(),
   scenarios: [] as TlsScenario[],
 }));
-const dnsBoundary = vi.hoisted(() => ({ lookup: vi.fn() }));
+const dnsBoundary = vi.hoisted(() => ({ lookup: vi.fn(), resolve4: vi.fn() }));
 
 vi.mock('node:tls', async (original) => {
   const actual = await original<typeof import('node:tls')>();
@@ -30,10 +30,20 @@ vi.mock('node:tls', async (original) => {
     connect: tlsBoundary.connect,
   };
 });
-vi.mock('node:dns/promises', () => ({ lookup: dnsBoundary.lookup }));
+vi.mock('node:dns/promises', () => ({
+  lookup: dnsBoundary.lookup,
+  Resolver: class {
+    resolve4 = dnsBoundary.resolve4;
+    setServers() {}
+    async resolve6() {
+      return [];
+    }
+  },
+}));
 
 import { inspectTlsTool } from '@/mcp-server/tools/definitions/inspect-tls.tool.js';
 import { TlsService } from '@/services/tls/tls-service.js';
+import { isTlsSourceAbsent } from '@/utils/discovery.js';
 
 class FakeTlsSocket extends EventEmitter {
   authorized: boolean;
@@ -100,6 +110,7 @@ describe('TlsService', () => {
     tlsBoundary.destroy.mockReset();
     dnsBoundary.lookup.mockReset();
     dnsBoundary.lookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
+    dnsBoundary.resolve4.mockReset().mockResolvedValue(['93.184.216.34']);
     tlsBoundary.connect.mockImplementation((_options, callback) => {
       const scenario = tlsBoundary.scenarios.shift();
       if (!scenario) throw new Error('Missing fake TLS scenario');
@@ -393,6 +404,22 @@ describe('TlsService', () => {
     dnsBoundary.lookup.mockResolvedValue([{ address: '10.0.0.4', family: 4 }]);
 
     await expect(new TlsService().getSans('internal.example.com')).rejects.toThrow('SSRF_BLOCKED:');
+    expect(tlsBoundary.connect).not.toHaveBeenCalled();
+  });
+
+  it('distinguishes DNS absence and DNS connection refusal for the SAN source', async () => {
+    vi.stubEnv('ATTACKSURFACE_ALLOW_PRIVATE_TARGETS', 'false');
+    dnsBoundary.resolve4.mockRejectedValueOnce(
+      Object.assign(new Error('no answer'), { code: 'ENODATA' }),
+    );
+    await expect(new TlsService().getSans('missing.example.com')).rejects.toSatisfy(
+      isTlsSourceAbsent,
+    );
+    dnsBoundary.resolve4.mockRejectedValueOnce(
+      Object.assign(new Error('resolver connection refused'), { code: 'ECONNREFUSED' }),
+    );
+    await expect(new TlsService().getSans('example.com')).rejects.not.toSatisfy(isTlsSourceAbsent);
+    expect(dnsBoundary.lookup).not.toHaveBeenCalled();
     expect(tlsBoundary.connect).not.toHaveBeenCalled();
   });
 

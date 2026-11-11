@@ -182,7 +182,7 @@ describe('CtService', () => {
           ok: true,
           complete: false,
           pagesFetched: 1,
-          incompleteReason: 'deadline',
+          incompleteReason: mode === 'body' ? 'deadline' : 'page_failed',
         });
         expect(fetchMock).toHaveBeenCalledTimes(2);
       } finally {

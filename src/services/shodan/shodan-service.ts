@@ -9,7 +9,7 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { McpError, notFound } from '@cyanheads/mcp-ts-core/errors';
+import { McpError, notFound, rateLimited } from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
 import type {
@@ -178,7 +178,7 @@ function translateUpstreamError(err: unknown): unknown {
       return notFound('Shodan has no information for this target.');
     case 429:
       return err instanceof McpError
-        ? new McpError(err.code, 'Shodan rate limit / no query credits (HTTP 429).', err.data)
+        ? rateLimited('Shodan rate limit / no query credits (HTTP 429).', err.data, { cause: err })
         : err;
     default:
       return err;

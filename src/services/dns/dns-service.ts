@@ -1,14 +1,14 @@
 /**
  * @fileoverview DNS resolution service — multi-resolver enumeration and reverse PTR via
- * node:dns/promises. Per-resolver reporting surfaces propagation gaps. Every host is SSRF-guarded
- * (rejects hosts resolving to private/loopback/metadata ranges) and every resolver IP is validated
- * against private ranges before use. Pure-runtime: no upstream auth, only per-query timeouts.
+ * node:dns/promises. Per-resolver reporting surfaces propagation gaps. Every resolver IP is
+ * validated before use. Answer addresses are DNS evidence and are never dialed by this service.
  * @module services/dns/dns-service
  */
 
-import { Resolver } from 'node:dns/promises';
+import type { Resolver } from 'node:dns/promises';
 import { performance } from 'node:perf_hooks';
-import { assertSafeDomain, assertSafeResolverIp } from '@/utils/ssrf-guard.js';
+import { assertSafeResolverIp, getValidatedDefaultResolvers } from '@/utils/ssrf-guard.js';
+import { isDnsAbsent, withConfiguredResolver } from './configured-resolver.js';
 import {
   ALL_RECORD_TYPES,
   type DnsRecordType,
@@ -65,43 +65,39 @@ async function queryResolver(
   host: string,
   types: DnsRecordType[],
   timeoutMs: number,
+  checkOmittedAddresses: boolean,
   signal?: AbortSignal,
-): Promise<ResolverResult> {
-  signal?.throwIfAborted();
-  const resolver = new Resolver({ timeout: timeoutMs, tries: 2 });
-  resolver.setServers([resolverIp]);
-
+): Promise<{ result: ResolverResult; addresses: string[] }> {
   const start = performance.now();
   const records: Partial<Record<DnsRecordType, string[]>> = {};
   let firstError: string | null = null;
-
-  const cancel = () => resolver.cancel();
-  signal?.addEventListener('abort', cancel, { once: true });
-  try {
-    await Promise.allSettled(
-      types.map(async (type) => {
+  const queryTypes: DnsRecordType[] = checkOmittedAddresses ? [...types, 'A', 'AAAA'] : types;
+  await withConfiguredResolver(resolverIp, { timeout: timeoutMs, tries: 2 }, signal, (resolver) =>
+    Promise.all(
+      queryTypes.map(async (type) => {
         try {
           const vals = await resolveOne(resolver, host, type);
           if (vals.length > 0) records[type] = vals;
-        } catch (err) {
-          const code = (err as NodeJS.ErrnoException).code;
-          // NODATA/NOTFOUND/NXDOMAIN are normal "no records of this type" — not a resolver failure.
-          if (code !== 'ENODATA' && code !== 'ENOTFOUND') {
-            if (!firstError) firstError = (err as Error).message;
-          }
+        } catch (error) {
+          if (!firstError && !isDnsAbsent(error)) firstError = (error as Error).message;
         }
       }),
-    );
-  } finally {
-    signal?.removeEventListener('abort', cancel);
+    ),
+  );
+  const addresses = [...new Set([...(records.A ?? []), ...(records.AAAA ?? [])])];
+  if (checkOmittedAddresses) {
+    delete records.A;
+    delete records.AAAA;
   }
-  signal?.throwIfAborted();
 
   return {
-    resolver: resolverIp,
-    latencyInMs: Math.round(performance.now() - start),
-    records,
-    queryError: firstError,
+    result: {
+      resolver: resolverIp,
+      latencyInMs: Math.round(performance.now() - start),
+      records,
+      queryError: firstError,
+    },
+    addresses,
   };
 }
 
@@ -130,15 +126,15 @@ export class DnsService {
     signal?: AbortSignal,
   ): Promise<HostDnsResult[]> {
     signal?.throwIfAborted();
+    const [primaryIp, ...secondaryIps] = resolverIps;
+    if (!primaryIp) throw new Error('Provide at least one DNS resolver IP.');
     // SSRF guard: validate resolver IPs directly (caller-controlled, no DNS needed).
     for (const ip of resolverIps) assertSafeResolverIp(ip);
 
     const results = await Promise.allSettled(
-      hosts.map(async (host) => {
-        // SSRF guard: reject hosts resolving to private/loopback/metadata ranges.
-        await assertSafeDomain(host, signal);
-        return this.resolveOneHost(host, types, resolverIps, reverse, timeoutMs, signal);
-      }),
+      hosts.map((host) =>
+        this.resolveOneHost(host, types, primaryIp, secondaryIps, reverse, timeoutMs, signal),
+      ),
     );
     signal?.throwIfAborted();
 
@@ -159,61 +155,74 @@ export class DnsService {
   private async resolveOneHost(
     host: string,
     types: DnsRecordType[],
-    resolverIps: string[],
+    primaryIp: string,
+    secondaryIps: string[],
     reverse: boolean,
     timeoutMs: number,
     signal?: AbortSignal,
   ): Promise<HostDnsResult> {
-    const resolverResults = await Promise.all(
-      resolverIps.map((ip) => queryResolver(ip, host, types, timeoutMs, signal)),
-    );
-
-    const primary = resolverResults[0]?.records ?? {};
+    const [primary, ...secondary] = await Promise.all([
+      queryResolver(
+        primaryIp,
+        host,
+        types,
+        timeoutMs,
+        !types.includes('A') && !types.includes('AAAA'),
+        signal,
+      ),
+      ...secondaryIps.map((ip) => queryResolver(ip, host, types, timeoutMs, false, signal)),
+    ]);
+    const resolverResults = [primary.result, ...secondary.map(({ result }) => result)];
     const mismatches = findMismatches(resolverResults, types);
-    const resolved = Boolean(primary.A?.length || primary.AAAA?.length);
-
-    let reverseResults: ReverseResult[] | undefined;
-    if (reverse) {
-      const ips = [...new Set([...(primary.A ?? []), ...(primary.AAAA ?? [])])];
-      reverseResults = await this.reverseLookup(ips, timeoutMs);
-    }
+    const reverseResults = reverse
+      ? await this.reverseLookup(primary.addresses, timeoutMs, signal, primaryIp)
+      : undefined;
 
     const anyError = resolverResults.find((r) => r.queryError)?.queryError ?? null;
 
     return {
       host,
-      records: primary,
+      records: primary.result.records,
       resolverResults,
       propagationMismatches: mismatches,
       ...(reverseResults ? { reverse: reverseResults } : {}),
-      resolved,
+      resolved: primary.addresses.length > 0,
       hostError: anyError,
     };
   }
 
-  /** Reverse-resolve (PTR) a list of IPs using the system resolver. */
-  async reverseLookup(ips: string[], timeoutMs = DEFAULT_TIMEOUT_MS): Promise<ReverseResult[]> {
-    const resolver = new Resolver({ timeout: timeoutMs, tries: 2 });
-    return await Promise.all(
-      ips.map(async (ip) => {
-        try {
-          const hostnames = await resolver.reverse(ip);
-          return { ip, hostnames: hostnames.sort(), lookupError: null };
-        } catch (err) {
-          const code = (err as NodeJS.ErrnoException).code;
-          // No PTR record is a normal answer, not an error.
-          if (code === 'ENOTFOUND' || code === 'ENODATA') {
-            return { ip, hostnames: [], lookupError: null };
-          }
-          return { ip, hostnames: [], lookupError: (err as Error).message };
-        }
-      }),
+  /** Reverse-resolve addresses with the primary resolver from the forward query. */
+  async reverseLookup(
+    ips: string[],
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    signal?: AbortSignal,
+    resolverIp = getValidatedDefaultResolvers()[0],
+  ): Promise<ReverseResult[]> {
+    signal?.throwIfAborted();
+    if (ips.length === 0) return [];
+    assertSafeResolverIp(resolverIp);
+    return await withConfiguredResolver(
+      resolverIp,
+      { timeout: timeoutMs, tries: 2 },
+      signal,
+      (resolver) =>
+        Promise.all(
+          ips.map(async (ip) => {
+            try {
+              const hostnames = await resolver.reverse(ip);
+              return { ip, hostnames: hostnames.sort(), lookupError: null };
+            } catch (error) {
+              const lookupError = isDnsAbsent(error) ? null : (error as Error).message;
+              return { ip, hostnames: [], lookupError };
+            }
+          }),
+        ),
     );
   }
 
   /**
-   * Lightweight liveness probe used by enumerate/map: resolve A/AAAA for a host via the system
-   * resolver. Returns the resolved IPs (empty when the host does not resolve). SSRF-guarded.
+   * Lightweight liveness probe using the first configured resolver.
+   * Returns the resolved IPs, or an empty list when there are no address answers.
    */
   async resolveAddresses(host: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<string[]> {
     return (await this.resolveAddressStatus(host, timeoutMs)).addresses;
@@ -226,28 +235,20 @@ export class DnsService {
     signal?: AbortSignal,
   ): Promise<{ addresses: string[]; addressError: string | null }> {
     signal?.throwIfAborted();
-    await assertSafeDomain(host, signal);
-    signal?.throwIfAborted();
-    const resolver = new Resolver({ timeout: timeoutMs, tries: 1 });
+    const [resolverIp] = getValidatedDefaultResolvers();
     const out: string[] = [];
-    const cancel = () => resolver.cancel();
-    signal?.addEventListener('abort', cancel, { once: true });
-    let results: PromiseSettledResult<number>[];
-    try {
-      results = await Promise.allSettled([
-        resolver.resolve4(host).then((a) => out.push(...a)),
-        resolver.resolve6(host).then((a) => out.push(...a)),
-      ]);
-    } finally {
-      signal?.removeEventListener('abort', cancel);
-    }
-    signal?.throwIfAborted();
+    const results = await withConfiguredResolver(
+      resolverIp,
+      { timeout: timeoutMs, tries: 1 },
+      signal,
+      (resolver) =>
+        Promise.allSettled([
+          resolver.resolve4(host).then((a) => out.push(...a)),
+          resolver.resolve6(host).then((a) => out.push(...a)),
+        ]),
+    );
     const errors = results.flatMap((r, i) => {
-      if (
-        r.status === 'fulfilled' ||
-        ['ENODATA', 'ENOTFOUND'].includes((r.reason as NodeJS.ErrnoException).code ?? '')
-      )
-        return [];
+      if (r.status === 'fulfilled' || isDnsAbsent(r.reason)) return [];
       return [`${i === 0 ? 'A' : 'AAAA'}: ${(r.reason as Error).message}`];
     });
     return { addresses: [...new Set(out)], addressError: errors.length ? errors.join('; ') : null };

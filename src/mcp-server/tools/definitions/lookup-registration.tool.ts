@@ -16,6 +16,10 @@ import {
 } from '@/services/registration/registration-service.js';
 import { literalText } from '@/utils/literal-text.js';
 import { isValidRegistrationTarget, normalizeDomain } from '@/utils/validation.js';
+import {
+  formatRegistrationAbuseContact,
+  RegistrationAbuseContactSchema,
+} from '../registration-abuse-contact.js';
 
 const EventSchema = z
   .object({
@@ -31,6 +35,9 @@ const DomainRegistrationSchema = z
     kind: z.literal('domain').describe('Discriminator: domain registration record.'),
     target: z.string().describe('Domain queried.'),
     registrar: z.string().optional().describe('Registrar name, when disclosed.'),
+    registrarAbuseContact: RegistrationAbuseContactSchema.optional().describe(
+      'Abuse contact disclosed for the registrar.',
+    ),
     statuses: z.array(z.string()).describe('Registry/EPP status codes.'),
     events: z.array(EventSchema).describe('Registration lifecycle events.'),
     nameservers: z.array(z.string()).describe('Nameserver hostnames.'),
@@ -43,6 +50,13 @@ const IpRegistrationSchema = z
     kind: z.literal('ip').describe('Discriminator: IP/netblock registration record.'),
     target: z.string().describe('IP or CIDR queried.'),
     networkName: z.string().optional().describe('Network/handle name, when present.'),
+    organization: z
+      .string()
+      .optional()
+      .describe('Organization explicitly identified as the allocation registrant.'),
+    abuseContact: RegistrationAbuseContactSchema.optional().describe(
+      'Abuse contact disclosed for the allocation.',
+    ),
     cidrs: z.array(z.string()).describe('Allocation CIDR(s) for the netblock.'),
     originAsns: z.array(z.number()).describe('Origin AS number(s), when present.'),
     country: z
@@ -57,7 +71,7 @@ const IpRegistrationSchema = z
 export const lookupRegistrationTool = tool('attacksurface_lookup_registration', {
   title: 'attacksurface_lookup_registration',
   description:
-    'Look up registration and ownership via RDAP (structured JSON), with a WHOIS fallback for TLDs without RDAP or when RDAP is unresponsive. For a domain it returns registrar, status codes, creation/expiry/updated events, nameservers, and DNSSEC; for an IP or CIDR it returns the netblock name, allocation CIDRs, origin ASN, and country. Registry data is frequently redacted or sparse — absent fields are reported as unknown, never inferred. Use only on assets you own or are authorized to assess.',
+    'Look up registration and ownership via RDAP (structured JSON), with a WHOIS fallback for TLDs without RDAP or when RDAP is unresponsive. For a domain it returns registrar, registrar abuse contact, status codes, creation/expiry/updated events, nameservers, and DNSSEC when disclosed. For an IP or CIDR it returns netblock name, registrant organization, abuse contact, allocation CIDRs, origin ASN, and country when disclosed. Registry data is frequently redacted or sparse. Use only on assets you own or are authorized to assess.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     target: z
@@ -128,6 +142,10 @@ export const lookupRegistrationTool = tool('attacksurface_lookup_registration', 
 
     if (r.kind === 'domain') {
       lines.push(`**Registrar:** ${literalText(r.registrar ?? 'unknown')}`);
+      if (r.registrarAbuseContact)
+        lines.push(
+          ...formatRegistrationAbuseContact('Registrar abuse contact', r.registrarAbuseContact),
+        );
       lines.push(
         `**DNSSEC:** ${r.dnssecSigned === undefined ? 'unknown' : r.dnssecSigned ? 'signed' : 'unsigned'}`,
       );
@@ -141,6 +159,9 @@ export const lookupRegistrationTool = tool('attacksurface_lookup_registration', 
         lines.push(`**Nameservers:** ${r.nameservers.map(literalText).join(', ')}`);
     } else {
       lines.push(`**Network:** ${literalText(r.networkName ?? 'unknown')}`);
+      if (r.organization) lines.push(`**Organization:** ${literalText(r.organization)}`);
+      if (r.abuseContact)
+        lines.push(...formatRegistrationAbuseContact('Abuse contact', r.abuseContact));
       lines.push(`**Country:** ${literalText(r.country ?? 'unknown')}`);
       if (r.cidrs.length > 0) lines.push(`**CIDRs:** ${r.cidrs.map(literalText).join(', ')}`);
       if (r.originAsns.length > 0)

@@ -18,6 +18,8 @@ export interface CtSourceStatus {
   ok: boolean;
   /** Successfully read pages, including an empty terminal page. */
   pagesFetched?: number;
+  /** Upstream retry window in milliseconds, when a valid Retry-After was supplied. */
+  retryAfterMs?: number;
   /** Source name. */
   source: CtSource;
   /** Error message when the source failed, else null. */

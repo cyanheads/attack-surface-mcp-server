@@ -10,7 +10,7 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { McpError } from '@cyanheads/mcp-ts-core/errors';
+import { McpError, rateLimited } from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
 import type { CtEnumerationResult, CtSource, CtSourceStatus, DiscoveredName } from './types.js';
@@ -124,6 +124,7 @@ export class CtService {
           complete: result.complete,
           pagesFetched: result.pagesFetched,
           incompleteReason: result.incompleteReason,
+          ...(result.retryAfterMs === undefined ? {} : { retryAfterMs: result.retryAfterMs }),
         });
       } catch (err) {
         ctx.signal?.throwIfAborted();
@@ -191,6 +192,7 @@ export class CtService {
     pagesFetched: number;
     incompleteReason: string | null;
     sourceError: string | null;
+    retryAfterMs?: number;
   }> {
     const url =
       `https://api.certspotter.com/v1/issuances?domain=${encodeURIComponent(domain)}` +
@@ -202,6 +204,7 @@ export class CtService {
     if (this.config.certspotterApiKey) {
       headers.authorization = `Bearer ${this.config.certspotterApiKey}`;
     }
+    const deadlineAt = Date.now() + CERTSPOTTER_TIMEOUT_MS;
     const deadline = AbortSignal.timeout(CERTSPOTTER_TIMEOUT_MS);
     const signal = ctx.signal ? AbortSignal.any([ctx.signal, deadline]) : deadline;
     const names: string[] = [];
@@ -211,50 +214,53 @@ export class CtService {
     try {
       while (pagesFetched < CERTSPOTTER_PAGE_CAP) {
         signal.throwIfAborted();
+        const remainingMs = deadlineAt - Date.now();
+        if (remainingMs <= 0)
+          throw new DOMException('Certspotter source deadline exceeded.', 'TimeoutError');
         const records = await withRetry(
-          async () => {
+          async ({ signal: attemptSignal, remainingMs: attemptRemainingMs }) => {
             // Free-tier rate limiting (429) is the documented norm without a key and the reason the
             // CERTSPOTTER_API_KEY exists — log it at debug, not error.
             let res: Response;
             try {
               res = await fetchWithTimeout(
                 after ? `${url}&after=${encodeURIComponent(after)}` : url,
-                CERTSPOTTER_TIMEOUT_MS,
+                Math.min(CERTSPOTTER_TIMEOUT_MS, attemptRemainingMs),
                 ctx,
                 {
                   headers,
                   expectedStatuses: [429],
-                  signal,
+                  signal: attemptSignal,
                 },
               );
             } catch (err) {
               // Re-label with remediation text; keep the code and `data.retryAfter` so retries
               // still honor Retry-After.
               if (err instanceof McpError && err.data?.status === 429) {
-                throw new McpError(
-                  err.code,
+                throw rateLimited(
                   'Certspotter rate limit hit (set CERTSPOTTER_API_KEY to raise it).',
                   err.data,
+                  { cause: err },
                 );
               }
               throw err;
             }
-            signal.throwIfAborted();
+            attemptSignal.throwIfAborted();
             let abortBody!: () => void;
             const aborted = new Promise<never>((_, reject) => {
               abortBody = () => {
                 void res.body?.cancel().catch(() => {});
-                reject(signal.reason);
+                reject(attemptSignal.reason);
               };
-              signal.addEventListener('abort', abortBody, { once: true });
+              attemptSignal.addEventListener('abort', abortBody, { once: true });
             });
             let body: unknown;
             try {
               body = await Promise.race([res.json(), aborted]);
             } finally {
-              signal.removeEventListener('abort', abortBody);
+              attemptSignal.removeEventListener('abort', abortBody);
             }
-            signal.throwIfAborted();
+            attemptSignal.throwIfAborted();
             return parseRecords(body, 'certspotter');
           },
           {
@@ -262,6 +268,7 @@ export class CtService {
             context: ctx,
             baseDelayMs: 2000,
             maxRetries: 2,
+            deadlineMs: remainingMs,
             signal,
           },
         );
@@ -290,12 +297,35 @@ export class CtService {
       };
     } catch (err) {
       ctx.signal?.throwIfAborted();
+      const rawRetryAfter =
+        err instanceof McpError && err.data?.status === 429 ? err.data.retryAfter : undefined;
+      let retryAfterMs: number | undefined;
+      if (typeof rawRetryAfter === 'string') {
+        const value = rawRetryAfter.trim();
+        const seconds =
+          value.length > 0 && [...value].every((char) => char >= '0' && char <= '9')
+            ? Number(value)
+            : undefined;
+        const dateMs = value.endsWith('GMT') ? Date.parse(value) : Number.NaN;
+        const parsed = seconds === undefined ? Math.max(0, dateMs - Date.now()) : seconds * 1000;
+        if (Number.isFinite(parsed)) retryAfterMs = parsed;
+      }
+      const sourceError = err instanceof Error ? err.message : String(err);
       return {
         names,
         complete: false,
         pagesFetched,
-        incompleteReason: deadline.aborted ? 'deadline' : 'page_failed',
-        sourceError: err instanceof Error ? err.message : String(err),
+        incompleteReason:
+          deadline.aborted ||
+          Date.now() >= deadlineAt ||
+          (err instanceof McpError && err.data?.reason === 'retry_deadline_exceeded')
+            ? 'deadline'
+            : 'page_failed',
+        sourceError:
+          retryAfterMs === undefined
+            ? sourceError
+            : `${sourceError} Retry after ${retryAfterMs} ms.`,
+        ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
       };
     }
   }

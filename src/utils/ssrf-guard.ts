@@ -1,8 +1,8 @@
 /**
  * @fileoverview SSRF guard — blocks outbound requests to private, loopback, link-local, and
  * cloud-metadata addresses for user-supplied targets. This is the security spine of a server that
- * connects to arbitrary user-named hosts: every DNS resolution, TLS handshake, and HTTP GET against
- * a user-supplied target must pass through one of the exported assertions before connecting.
+ * connects to arbitrary user-named hosts: check TLS, WHOIS and HTTP connection targets, and
+ * validate resolver IPs before collecting DNS evidence.
  *
  * Entry points:
  *  - `assertSafeDomain(domain)` — bare host inputs (assert-only)
@@ -24,6 +24,15 @@
 
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
+import { getServerConfig, parseResolverList } from '@/config/server-config.js';
+import {
+  DnsValidationError,
+  dnsErrorCode,
+  isDnsAbsent,
+  withConfiguredResolver,
+} from '@/services/dns/configured-resolver.js';
+
+const DNS_TIMEOUT_MS = 5000;
 
 /** CIDR blocks that are non-routable or typically internal. */
 const PRIVATE_RANGES: Array<{ base: bigint; mask: bigint; label: string }> = (() => {
@@ -135,13 +144,38 @@ function checkIp(ip: string): string | null {
   return isPrivateIPv4(ip);
 }
 
-/**
- * Resolve a hostname and throw if any resolved IP is private. A literal IP is checked directly.
- * Returns the validated public IPs (every resolved address, all confirmed public) so a caller can
- * connect to a checked IP rather than re-resolving the name — closing the TOCTOU/DNS-rebinding gap
- * between this check and the connect. Returns an empty array when the input was a literal IP (the
- * caller already holds it) or when DNS resolution failed (let the connect fail naturally).
- */
+/** Resolve using the OS. Its lookup API cannot cancel the underlying getaddrinfo call. */
+async function lookupSystem(hostname: string, signal?: AbortSignal): Promise<string[]> {
+  signal?.throwIfAborted();
+  let abort: (() => void) | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      lookup(hostname, { all: true }),
+      new Promise<never>((_resolve, reject) => {
+        abort = () => reject(signal?.reason);
+        signal?.addEventListener('abort', abort, { once: true });
+        if (signal?.aborted) abort();
+        timer = setTimeout(
+          () => reject(new DnsValidationError('System DNS lookup timed out.', 'ETIMEOUT')),
+          DNS_TIMEOUT_MS,
+        );
+      }),
+    ]);
+    signal?.throwIfAborted();
+    return result.map(({ address }) => address);
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (isDnsAbsent(error)) return [];
+    if (error instanceof DnsValidationError) throw error;
+    throw new DnsValidationError('System DNS lookup failed.', dnsErrorCode(error) ?? 'EAI_FAIL');
+  } finally {
+    if (abort) signal?.removeEventListener('abort', abort);
+    clearTimeout(timer);
+  }
+}
+
+/** Check configured DNS before touching the OS resolver, then validate the OS connection IPs. */
 async function resolveAndCheck(
   hostname: string,
   context: string,
@@ -151,50 +185,58 @@ async function resolveAndCheck(
   const stripped = hostname.replace(/^\[/, '').replace(/\]$/, '');
 
   // Literal IP target — check directly without a DNS round-trip.
-  const literalLabel = checkIp(stripped);
-  if (literalLabel) {
-    throw new Error(
-      `SSRF_BLOCKED: ${context} is a ${literalLabel} address. ` +
-        `Requests to private, loopback, or cloud-metadata addresses are not permitted. ` +
-        `Set ATTACKSURFACE_ALLOW_PRIVATE_TARGETS=true to allow internal-network assessment.`,
-    );
-  }
-  // If it parsed as any IP literal (public), no DNS lookup is needed.
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(stripped) || stripped.includes(':')) return [];
-
-  let abortListener: (() => void) | undefined;
-  let addresses: import('node:dns').LookupAddress[];
-  try {
-    const resolution = lookup(hostname, { all: true });
-    addresses = signal
-      ? await Promise.race([
-          resolution,
-          new Promise<never>((_resolve, reject) => {
-            abortListener = () => reject(signal.reason);
-            signal.addEventListener('abort', abortListener, { once: true });
-            if (signal.aborted) abortListener();
-          }),
-        ])
-      : await resolution;
-  } catch {
-    signal?.throwIfAborted();
-    // DNS failure is not a security issue — let the downstream fetch/connect fail naturally.
-    return [];
-  } finally {
-    if (abortListener) signal?.removeEventListener('abort', abortListener);
-  }
-
-  for (const { address } of addresses) {
-    const label = checkIp(address);
+  if (isIP(stripped)) {
+    const label = checkIp(stripped);
     if (label) {
       throw new Error(
-        `SSRF_BLOCKED: ${context} resolves to ${address} (${label}). ` +
-          `Requests to private, loopback, or cloud-metadata addresses are not permitted. ` +
-          `Set ATTACKSURFACE_ALLOW_PRIVATE_TARGETS=true to allow internal-network assessment.`,
+        `SSRF_BLOCKED: ${context} is a ${label} address. Requests to private, loopback, or cloud-metadata addresses are not permitted. Set ATTACKSURFACE_ALLOW_PRIVATE_TARGETS=true to allow internal-network assessment.`,
+      );
+    }
+    return [];
+  }
+
+  function checkAddresses(addresses: string[]) {
+    if (addresses.some((ip) => !isIP(ip) || checkIp(ip))) {
+      throw new Error(
+        `SSRF_BLOCKED: ${context} resolved to an address that is not permitted. Set ATTACKSURFACE_ALLOW_PRIVATE_TARGETS=true to allow internal-network assessment.`,
       );
     }
   }
-  return addresses.map((a) => a.address);
+
+  const [resolverIp] = getValidatedDefaultResolvers();
+  const results = await withConfiguredResolver(
+    resolverIp,
+    { timeout: DNS_TIMEOUT_MS, tries: 1 },
+    signal,
+    (resolver) => Promise.allSettled([resolver.resolve4(hostname), resolver.resolve6(hostname)]),
+  );
+  const publicAnswers: string[] = [];
+  for (const result of results) {
+    if (result.status === 'fulfilled') publicAnswers.push(...result.value);
+    else if (!isDnsAbsent(result.reason)) {
+      throw new DnsValidationError(
+        'Configured DNS safety check failed.',
+        dnsErrorCode(result.reason) ?? 'EAI_FAIL',
+      );
+    }
+  }
+  if (publicAnswers.length === 0) {
+    throw new DnsValidationError(
+      `${context} has no A or AAAA records from the configured resolver.`,
+      'ENOTFOUND',
+    );
+  }
+  checkAddresses(publicAnswers);
+
+  const addresses = await lookupSystem(hostname, signal);
+  if (addresses.length === 0) {
+    throw new DnsValidationError(
+      `${context} has no addresses from the system resolver.`,
+      'ENOTFOUND',
+    );
+  }
+  checkAddresses(addresses);
+  return addresses;
 }
 
 /** True when the operator has explicitly enabled private-target access. */
@@ -225,7 +267,7 @@ export async function assertSafeUrl(rawUrl: string, signal?: AbortSignal): Promi
   }
 
   if (privateTargetsAllowed()) return;
-  await resolveAndCheck(parsed.hostname, `URL "${rawUrl}"`, signal);
+  await resolveAndCheck(parsed.hostname, `Host "${parsed.hostname}"`, signal);
 }
 
 /**
@@ -245,7 +287,7 @@ export async function assertSafeDomain(domain: string, signal?: AbortSignal): Pr
  * dual-stack host pins to IPv4: resolver order is runtime-dependent (Bun lists AAAA first), and a
  * client network without an IPv6 route — Docker's default bridge included — cannot dial the AAAA.
  * Returns `null` when the caller should connect by hostname instead: a literal-IP input (already the
- * target), a DNS failure (let the connect surface it), or when private targets are explicitly
+ * target), or when private targets are explicitly
  * allowed. Throws `SSRF_BLOCKED` when the host resolves to a non-public address. The caller must
  * still send the original hostname as TLS SNI / HTTP Host so certificate validation and vhost
  * routing hold.
@@ -263,6 +305,7 @@ export async function resolveSafeHost(host: string, signal?: AbortSignal): Promi
  * No-ops when `ATTACKSURFACE_ALLOW_PRIVATE_TARGETS=true`.
  */
 export function assertSafeResolverIp(ip: string): void {
+  if (!isIP(ip) || ip.includes('%')) throw new Error(`Invalid DNS resolver IP "${ip}".`);
   if (privateTargetsAllowed()) return;
   const label = checkIp(ip);
   if (label) {
@@ -272,4 +315,13 @@ export function assertSafeResolverIp(ip: string): void {
         `Set ATTACKSURFACE_ALLOW_PRIVATE_TARGETS=true to allow private resolvers.`,
     );
   }
+}
+
+/** Validate the whole configured resolver list before using any of its entries. */
+export function getValidatedDefaultResolvers(): [string, ...string[]] {
+  const [first, ...rest] = parseResolverList(getServerConfig().defaultResolvers);
+  if (!first) throw new Error('ATTACKSURFACE_DEFAULT_RESOLVERS must contain a DNS resolver IP.');
+  assertSafeResolverIp(first);
+  for (const ip of rest) assertSafeResolverIp(ip);
+  return [first, ...rest];
 }

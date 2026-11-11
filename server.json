@@ -31,7 +31,7 @@
         },
         {
           "name": "ATTACKSURFACE_DEFAULT_RESOLVERS",
-          "description": "Comma-separated default DNS resolver IPs for attacksurface_resolve_dns.",
+          "description": "Comma-separated public DNS resolver IPs. The first also supplies discovery liveness, PTR and public DNS checks before guarded connections.",
           "format": "string",
           "isRequired": false,
           "default": "8.8.8.8,1.1.1.1,9.9.9.9"

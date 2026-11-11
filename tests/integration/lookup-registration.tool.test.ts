@@ -24,6 +24,10 @@ import { initRegistrationService } from '@/services/registration/registration-se
 
 type HandlerCtx = Parameters<typeof lookupRegistrationTool.handler>[1];
 
+function jcard(...fields: Array<[string, string | null]>) {
+  return ['vcard', fields.map(([name, value]) => [name, {}, 'text', value])];
+}
+
 const config = {
   defaultResolvers: '8.8.8.8',
   httpUserAgent: 'attack-surface-test',
@@ -76,6 +80,129 @@ describe('attacksurface_lookup_registration', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
+  });
+
+  it('reports an organizational registrant and its nested abuse contact on both surfaces', async () => {
+    fetchMock.mockResolvedValue(
+      Response.json({
+        entities: [
+          {
+            roles: ['registrant'],
+            vcardArray: jcard(['kind', 'individual'], ['fn', 'Maintainer']),
+          },
+          {
+            roles: ['registrant'],
+            vcardArray: jcard(['kind', 'org'], ['fn', '*Example Org*']),
+            entities: [
+              {
+                roles: ['technical'],
+                entities: [
+                  {
+                    roles: ['abuse'],
+                    vcardArray: jcard(['fn', '<Abuse>'], ['email', 'abuse@example.com']),
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const result = await runToolContract(lookupRegistrationTool, { target: '8.8.8.8' });
+    expect(result.structuredContent).toMatchObject({
+      registration: {
+        organization: '*Example Org*',
+        abuseContact: { name: '<Abuse>', email: 'abuse@example.com' },
+      },
+    });
+    expect(result.content[0]).toMatchObject({ text: expect.stringContaining('`*Example Org*`') });
+    expect(result.content[0]).toMatchObject({ text: expect.stringContaining('`<Abuse>`') });
+    expect(result.content[0]).toMatchObject({
+      text: expect.stringContaining('`abuse@example.com`'),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(netBoundary.createConnection).not.toHaveBeenCalled();
+  });
+
+  it('reports the direct abuse contact in a sparse APNIC-style record without an organization', async () => {
+    fetchMock.mockResolvedValue(
+      Response.json({
+        name: 'RVRNET-IN',
+        entities: [
+          {
+            roles: ['technical', 'administrative'],
+            vcardArray: jcard(['email', 'tech@example.net']),
+          },
+          {
+            roles: ['abuse'],
+            vcardArray: jcard(['fn', 'IRT-RVRNET-IN'], ['email', 'support@rvrmail.com']),
+          },
+        ],
+      }),
+    );
+    const result = await runToolContract(lookupRegistrationTool, { target: '43.252.204.0' });
+    const output = lookupRegistrationTool.output.parse(result.structuredContent);
+    expect(output.registration).toMatchObject({
+      networkName: 'RVRNET-IN',
+      abuseContact: { name: 'IRT-RVRNET-IN', email: 'support@rvrmail.com' },
+    });
+    expect(output.registration).not.toHaveProperty('organization');
+    const rendered = JSON.stringify(result.content);
+    expect(rendered).toContain('`support@rvrmail.com`');
+    expect(rendered).not.toContain('tech@example.net');
+  });
+
+  it('reports only the chosen registrar’s email-only abuse contact', async () => {
+    fetchMock.mockResolvedValue(
+      Response.json({
+        entities: [
+          {
+            roles: ['abuse'],
+            vcardArray: jcard(['fn', 'Unrelated'], ['email', 'wrong@example.net']),
+          },
+          {
+            roles: ['registrar'],
+            handle: 'REG',
+            entities: [
+              { roles: ['abuse'], vcardArray: jcard(['fn', '  '], ['email', 'abuse@example.net']) },
+              {
+                roles: ['technical'],
+                vcardArray: jcard(['fn', 'Help Desk'], ['email', 'tech@example.net']),
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const result = await runToolContract(lookupRegistrationTool, { target: 'example.com' });
+    const output = lookupRegistrationTool.output.parse(result.structuredContent);
+    expect(output.registration).toHaveProperty('registrarAbuseContact', {
+      email: 'abuse@example.net',
+    });
+    const rendered = JSON.stringify(result.content);
+    expect(rendered).toContain('`abuse@example.net`');
+    expect(rendered).not.toContain('wrong@example.net');
+    expect(rendered).not.toContain('Help Desk');
+  });
+
+  it('attributes WHOIS abuse only to the target domain’s registrar record', async () => {
+    const whois = [
+      'Domain Name: EXAMPLE.COM\r\nRegistrar: Registry\r\nRegistrar Abuse Contact Email: report@example.net',
+      'Domain Name: OTHER.NET\r\nRegistrar: Unrelated\r\nRegistrar Abuse Contact Email: wrong@example.net',
+    ].join('\r\n\r\n');
+    fetchMock.mockRejectedValue(new Error('RDAP unavailable'));
+    netBoundary.responses.push('refer: whois.registry.test\n', whois);
+
+    const result = await runToolContract(lookupRegistrationTool, { target: 'example.com' });
+    expect(result.structuredContent).toMatchObject({
+      source: 'whois',
+      registration: { registrarAbuseContact: { email: 'report@example.net' } },
+      rawWhois: whois,
+    });
+    const rendered = JSON.stringify(result.content);
+    expect(rendered).toContain('`report@example.net`');
+    expect(rendered).not.toContain('`wrong@example.net`');
   });
 
   it('retains a completely sparse successful RDAP record', async () => {

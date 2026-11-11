@@ -200,6 +200,10 @@ describe('attacksurface_map_domain', () => {
     const calls = mapDomainTool.output.parse(result.structuredContent).nextToolSuggestions;
     const args = reconGuidanceTool.input.parse(calls[0]?.args);
     expect(args.findings.hosts[0]).not.toHaveProperty('certDaysUntilExpiry');
+    expect(args.findings.hosts[0]?.certIdentityAuthorized).toBe(true);
+    expect(result.content[0]).toMatchObject({
+      text: expect.stringContaining('"certIdentityAuthorized":true'),
+    });
     expect(JSON.stringify(result.content)).toContain('attacksurface_recon_guidance');
     expect(JSON.stringify(result.content)).toContain('omittedHosts');
   });
@@ -236,6 +240,7 @@ describe('attacksurface_map_domain', () => {
     const output = mapDomainTool.output.parse(result.structuredContent);
     const args = reconGuidanceTool.input.parse(output.nextToolSuggestions[0]?.args);
     expect(args.findings.hosts[0]).not.toHaveProperty('certValidationAuthorized');
+    expect(args.findings.hosts[0]).not.toHaveProperty('certIdentityAuthorized');
     expect(args.findings.hosts[0]).not.toHaveProperty('certDaysUntilExpiry');
     expect(args.findings.hosts[0]).not.toHaveProperty('tlsProtocol');
   });
@@ -268,13 +273,53 @@ describe('attacksurface_map_domain', () => {
     },
   );
 
+  it('projects and renders the apex registrar contact and literal registration values', async () => {
+    dnsBoundary.resolve.mockImplementation(async (type) => (type === 'A' ? ['93.184.216.34'] : []));
+    fetchMock.mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (['https://crt.sh', 'https://api.certspotter.com'].includes(url.origin))
+        return Response.json([]);
+      if (url.origin !== 'https://rdap.org') return new Response('');
+      return Response.json({
+        status: ['*active*'],
+        entities: [
+          {
+            roles: ['registrar'],
+            vcardArray: ['vcard', [['fn', {}, 'text', '<Registrar>']]],
+            entities: [
+              {
+                roles: ['abuse'],
+                vcardArray: ['vcard', [['email', {}, 'text', 'abuse@example.net']]],
+              },
+            ],
+          },
+        ],
+      });
+    });
+    const result = await runToolContract(mapDomainTool, { domain: 'example.com' });
+    expect(result.structuredContent).toMatchObject({
+      registration: {
+        registrar: '<Registrar>',
+        statuses: ['*active*'],
+        registrarAbuseContact: { email: 'abuse@example.net' },
+      },
+    });
+    const rendered = JSON.stringify(result.content);
+    expect(rendered).toContain('`<Registrar>`');
+    expect(rendered).toContain('`*active*`');
+    expect(rendered).toContain('`abuse@example.net`');
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url).startsWith('https://rdap.org')),
+    ).toEqual([['https://rdap.org/domain/example.com', expect.any(Object)]]);
+  });
+
   it.each([false, true])(
-    'bounds the actual incremental handoff and preserves complete hosts (oversized=%s)',
-    async (oversized) => {
+    'passes the first 50 complete eligible hosts to guidance (long version=%s)',
+    async (longVersion) => {
       vi.useFakeTimers({ toFake: ['Date'] });
       vi.setSystemTime(new Date('2026-10-16T12:00:00Z'));
       const names = Array.from({ length: 54 }, (_, i) => `h${i}.example.com`);
-      const version = oversized ? '1'.repeat(18000) : '1.2';
+      const version = longVersion ? '1'.repeat(18000) : '1.2';
       tlsBoundary.connect.mockImplementation((_options, callback) => {
         const socket = new CertificateSocket('Oct 16 13:00:00 2026 GMT', callback);
         socket.authorized = false;
@@ -297,8 +342,7 @@ describe('attacksurface_map_domain', () => {
       const call = output.nextToolSuggestions[0];
       const args = reconGuidanceTool.input.parse(call?.args);
       expect(output.guidanceCoverage.eligibleCount).toBe(55);
-      expect(output.guidanceCoverage.includedCount).toBeLessThanOrEqual(50);
-      expect(output.guidanceCoverage.includedCount).toBeGreaterThan(0);
+      expect(output.guidanceCoverage.includedCount).toBe(50);
       expect(args.findings.hosts).toHaveLength(output.guidanceCoverage.includedCount);
       expect(args.findings.hosts[0]).toMatchObject({
         host: 'example.com',
@@ -316,23 +360,13 @@ describe('attacksurface_map_domain', () => {
         `nextToolSuggestions=\`${JSON.stringify(output.nextToolSuggestions)}\``,
       );
       expect(text).toContain(`guidanceCoverage=\`${JSON.stringify(output.guidanceCoverage)}\``);
-      const {
-        nextToolSuggestions: _nextToolSuggestions,
-        guidanceCoverage: _guidanceCoverage,
-        guidanceNotice: _guidanceNotice,
-        ...base
-      } = output;
-      const baseText = text.slice(0, text.indexOf('\n## Guidance handoff'));
-      const incremental =
-        Buffer.byteLength(JSON.stringify({ structuredContent: output, content: result.content })) -
-        Buffer.byteLength(
-          JSON.stringify({ structuredContent: base, content: [{ type: 'text', text: baseText }] }),
-        );
-      if (oversized) {
-        expect(output.guidanceCoverage.includedCount).toBe(1);
-        expect(output.guidanceNotice).toContain('oversized');
-        expect(args.findings.hosts[0]?.technologies?.[0]?.version).toBe(version);
-      } else expect(incremental).toBeLessThanOrEqual(24000);
+      expect(args.findings.hosts.map((host) => host.host)).toEqual(
+        output.liveHosts.slice(0, 50).map((h) => h.host),
+      );
+      expect(args.findings.hosts.map((host) => host.technologies?.[0]?.version)).toEqual(
+        Array(50).fill(version),
+      );
+      expect(output.guidanceNotice).toContain('5 omitted host(s)');
     },
   );
 
@@ -786,6 +820,25 @@ describe('attacksurface_map_domain', () => {
     });
     expect(JSON.stringify(result.content)).toContain('identityAuthorized=false');
     expect(JSON.stringify(result.content)).toContain('Certificate identity did not match');
+    const map = mapDomainTool.output.parse(result.structuredContent);
+    const call = map.nextToolSuggestions[0];
+    const guidanceArgs = reconGuidanceTool.input.parse(call?.args);
+    expect(guidanceArgs.findings.hosts[0]?.certIdentityAuthorized).toBe(false);
+    expect(result.content[0]).toMatchObject({
+      text: expect.stringContaining('"certIdentityAuthorized":false'),
+    });
+    const guidance = await runToolContract(reconGuidanceTool, guidanceArgs);
+    expect(guidance.structuredContent).toMatchObject({
+      priorities: expect.arrayContaining([
+        expect.objectContaining({
+          severity: 'high',
+          finding: 'example.com: TLS certificate does not match the requested hostname.',
+        }),
+      ]),
+    });
+    expect(JSON.stringify(guidance.content)).toContain(
+      'Deploy a certificate that covers the requested hostname.',
+    );
     const resource = await surfaceResource.handler({ domain: 'example.com' }, createMockContext());
     expect(resource).toMatchObject({
       hosts: [

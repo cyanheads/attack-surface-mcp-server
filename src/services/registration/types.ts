@@ -14,6 +14,12 @@ export interface RegistrationEvent {
   date: string;
 }
 
+/** Public name and mailbox attributed to the same abuse contact. */
+export interface RegistrationAbuseContact {
+  email?: string;
+  name?: string;
+}
+
 /** Domain registration record. All fields optional — RDAP/WHOIS data is frequently redacted/sparse. */
 export interface DomainRegistration {
   /** Whether DNSSEC is signed, when the registry reports it. */
@@ -25,6 +31,8 @@ export interface DomainRegistration {
   nameservers: string[];
   /** Registrar name, when disclosed. */
   registrar?: string;
+  /** Abuse contact disclosed by the registrar. */
+  registrarAbuseContact?: RegistrationAbuseContact;
   /** RDAP/registry status codes (e.g. "client transfer prohibited"). */
   statuses: string[];
   /** The domain queried. */
@@ -33,6 +41,8 @@ export interface DomainRegistration {
 
 /** IP / netblock registration record. All fields optional — RDAP fields are sparse. */
 export interface IpRegistration {
+  /** Abuse contact disclosed for the allocation. */
+  abuseContact?: RegistrationAbuseContact;
   /** Allocation CIDR(s) for the netblock. */
   cidrs: string[];
   /** Two-letter country code, when present (often null at the registry level). */
@@ -42,6 +52,8 @@ export interface IpRegistration {
   kind: 'ip';
   /** Network/handle name, when present. */
   networkName?: string;
+  /** Organization explicitly identified as the allocation registrant. */
+  organization?: string;
   /** Origin AS number(s), when present. */
   originAsns: number[];
   /** RDAP/registry status codes. */

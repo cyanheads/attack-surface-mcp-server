@@ -55,11 +55,12 @@ vi.mock('node:dns/promises', () => ({
     }
 
     reverse(ip: string) {
-      return dnsBoundary.reverse(ip);
+      return dnsBoundary.reverse(ip, this.server);
     }
   },
 }));
 
+import { resetServerConfig } from '@/config/server-config.js';
 import { DnsService } from '@/services/dns/dns-service.js';
 import { ALL_RECORD_TYPES } from '@/services/dns/types.js';
 
@@ -70,6 +71,8 @@ function dnsError(code: string, message = code): Error & { code: string } {
 describe('DnsService', () => {
   beforeEach(() => {
     vi.unstubAllEnvs();
+    vi.stubEnv('ATTACKSURFACE_DEFAULT_RESOLVERS', undefined);
+    resetServerConfig();
     dnsBoundary.lookup.mockReset();
     dnsBoundary.query.mockReset();
     dnsBoundary.reverse.mockReset();
@@ -260,8 +263,9 @@ describe('DnsService', () => {
     expect(result?.records.AAAA).toBeUndefined();
   });
 
-  it('degrades a host that resolves to a private address without querying it', async () => {
+  it('uses explicit DNS evidence even when the system lookup would return a private address', async () => {
     dnsBoundary.lookup.mockResolvedValue([{ address: '10.0.0.8', family: 4 }]);
+    dnsBoundary.query.mockResolvedValue(['10.0.0.9']);
 
     const [result] = await new DnsService().resolveHosts(
       ['internal.example.com'],
@@ -272,15 +276,16 @@ describe('DnsService', () => {
 
     expect(result).toMatchObject({
       host: 'internal.example.com',
-      resolved: false,
-      records: {},
-      resolverResults: [],
-      hostError: expect.stringMatching(/^SSRF_BLOCKED:/),
+      resolved: true,
+      records: { A: ['10.0.0.9'] },
+      resolverResults: [{ resolver: '8.8.8.8' }],
+      hostError: null,
     });
-    expect(dnsBoundary.query).not.toHaveBeenCalled();
+    expect(dnsBoundary.lookup).not.toHaveBeenCalled();
   });
 
   it('deduplicates liveness addresses from A and AAAA answers', async () => {
+    vi.stubEnv('ATTACKSURFACE_DEFAULT_RESOLVERS', '1.1.1.1,8.8.8.8');
     dnsBoundary.query.mockImplementation(async (type) =>
       type === 'A' ? ['93.184.216.34', '93.184.216.34'] : ['2606:2800:220:1:248:1893:25c8:1946'],
     );
@@ -289,6 +294,11 @@ describe('DnsService', () => {
       '93.184.216.34',
       '2606:2800:220:1:248:1893:25c8:1946',
     ]);
+    expect(dnsBoundary.query.mock.calls).toEqual([
+      ['A', 'www.example.com', '1.1.1.1'],
+      ['AAAA', 'www.example.com', '1.1.1.1'],
+    ]);
+    expect(dnsBoundary.lookup).not.toHaveBeenCalled();
   });
 
   it('retains successful address families alongside liveness failures', async () => {
@@ -348,5 +358,41 @@ describe('DnsService', () => {
       { ip: '93.184.216.34', hostnames: [], lookupError: null },
       { ip: '8.8.8.8', hostnames: [], lookupError: 'PTR timed out' },
     ]);
+    expect(dnsBoundary.reverse.mock.calls).toEqual([
+      ['93.184.216.34', '8.8.8.8'],
+      ['8.8.8.8', '8.8.8.8'],
+    ]);
+  });
+
+  it('checks omitted address families only on the first resolver and retains a partial failure', async () => {
+    dnsBoundary.query.mockImplementation(async (type, _host, resolver) => {
+      if (type === 'MX') return [{ priority: 0, exchange: '' }];
+      if (type === 'TXT') return [['v=spf1 -all']];
+      if (resolver !== '1.1.1.1') throw new Error('Unexpected secondary address query');
+      if (type === 'AAAA') throw dnsError('ESERVFAIL');
+      return ['93.184.216.34', '93.184.216.34'];
+    });
+    dnsBoundary.reverse.mockResolvedValue(['ptr.example.com']);
+    const [result] = await new DnsService().resolveHosts(
+      ['example.com'],
+      ['MX', 'TXT'],
+      ['1.1.1.1', '8.8.8.8'],
+      true,
+    );
+    const records = { MX: ['0 .'], TXT: ['v=spf1 -all'] };
+    expect(result).toMatchObject({
+      records,
+      resolverResults: [
+        { resolver: '1.1.1.1', queryError: 'ESERVFAIL' },
+        { resolver: '8.8.8.8', queryError: null },
+      ],
+      propagationMismatches: [],
+      hostError: 'ESERVFAIL',
+      resolved: true,
+      reverse: [{ ip: '93.184.216.34', hostnames: ['ptr.example.com'], lookupError: null }],
+    });
+    expect(result?.records).toEqual(records);
+    expect(result?.resolverResults.map((resolver) => resolver.records)).toEqual([records, records]);
+    expect(dnsBoundary.reverse.mock.calls).toEqual([['93.184.216.34', '1.1.1.1']]);
   });
 });

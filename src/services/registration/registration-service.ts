@@ -18,12 +18,14 @@ import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { ServerConfig } from '@/config/server-config.js';
 import { assertSafeUrl, resolveSafeHost } from '@/utils/ssrf-guard.js';
 import { normalizeAllocation } from './allocations.js';
+import { domainRdapAttribution, ipRdapAttribution, type RdapEntity } from './rdap-attribution.js';
 import type {
   DomainRegistration,
   IpRegistration,
   RegistrationEvent,
   RegistrationResult,
 } from './types.js';
+import { domainWhoisAbuseContact, ipWhoisAttribution } from './whois-attribution.js';
 
 const RDAP_HOP_TIMEOUT_MS = 5000;
 const WHOIS_DEADLINE_MS = 8000;
@@ -38,7 +40,7 @@ interface RdapResponse {
   cidr0_cidrs?: Array<{ v4prefix?: string; v6prefix?: string; length?: number }>;
   country?: string;
   endAddress?: string;
-  entities?: Array<{ roles?: string[]; vcardArray?: unknown; handle?: string }>;
+  entities?: RdapEntity[];
   events?: Array<{ eventAction?: string; eventDate?: string }>;
   handle?: string;
   ldhName?: string;
@@ -65,32 +67,12 @@ function mapEvents(events: RdapResponse['events']): RegistrationEvent[] {
   return out;
 }
 
-/** Extract the registrar name from RDAP entities (role "registrar"). */
-function extractRegistrar(entities: RdapResponse['entities']): string | undefined {
-  if (!entities) return;
-  for (const entity of entities) {
-    if (!entity.roles?.includes('registrar')) continue;
-    // vcardArray is ["vcard", [ ["version",{},"text","4.0"], ["fn",{},"text","Registrar Name"], ... ]]
-    const vcard = entity.vcardArray;
-    if (Array.isArray(vcard) && Array.isArray(vcard[1])) {
-      for (const field of vcard[1] as unknown[]) {
-        if (Array.isArray(field) && field[0] === 'fn' && typeof field[3] === 'string') {
-          return field[3];
-        }
-      }
-    }
-    if (entity.handle) return entity.handle;
-  }
-  return;
-}
-
 /** Parse an RDAP domain response into a DomainRegistration. */
 function parseDomainRdap(target: string, data: RdapResponse): DomainRegistration {
-  const registrar = extractRegistrar(data.entities);
   return {
     kind: 'domain',
     target,
-    ...(registrar ? { registrar } : {}),
+    ...domainRdapAttribution(data.entities),
     statuses: data.status ?? [],
     events: mapEvents(data.events),
     nameservers: (data.nameservers ?? [])
@@ -116,6 +98,7 @@ function parseIpRdap(target: string, data: RdapResponse): IpRegistration {
     kind: 'ip',
     target,
     ...(data.name ? { networkName: data.name } : data.handle ? { networkName: data.handle } : {}),
+    ...ipRdapAttribution(data.entities),
     cidrs,
     originAsns: data.arin_originas0_originautnums ?? [],
     ...(data.country ? { country: data.country } : {}),
@@ -260,39 +243,45 @@ export class RegistrationService {
    */
   private async whoisQuery(server: string, query: string, ctx: Context): Promise<string> {
     ctx.signal?.throwIfAborted();
-    const connectHost = (await resolveSafeHost(server)) ?? server;
-    ctx.signal?.throwIfAborted();
-    return new Promise((resolve, reject) => {
-      let data = '';
-      let settled = false;
-      const socket = net.createConnection(WHOIS_PORT, connectHost);
+    const controller = new AbortController();
+    const signal = controller.signal;
+    const onCallerAbort = () => controller.abort(ctx.signal?.reason);
+    ctx.signal?.addEventListener('abort', onCallerAbort, { once: true });
+    const timeout = new Error(`WHOIS ${server} timed out`);
+    const timer = setTimeout(() => controller.abort(timeout), WHOIS_DEADLINE_MS);
+    try {
+      const connectHost = (await resolveSafeHost(server, signal)) ?? server;
+      signal.throwIfAborted();
+      return await new Promise((resolve, reject) => {
+        let data = '';
+        let settled = false;
+        const socket = net.createConnection(WHOIS_PORT, connectHost);
+        const finish = (err?: unknown) => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener('abort', onAbort);
+          socket.destroy();
+          if (err === undefined) resolve(data);
+          else reject(err);
+        };
+        const onAbort = () => finish(signal.reason);
+        signal.addEventListener('abort', onAbort, { once: true });
 
-      const finish = (err?: Error) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        ctx.signal?.removeEventListener('abort', onAbort);
-        socket.destroy();
-        if (err) reject(err);
-        else resolve(data);
-      };
-
-      const timer = setTimeout(
-        () => finish(new Error(`WHOIS ${server} timed out`)),
-        WHOIS_DEADLINE_MS,
-      );
-
-      const onAbort = () => finish(new Error('WHOIS query aborted'));
-      if (ctx.signal) ctx.signal.addEventListener('abort', onAbort, { once: true });
-
-      socket.setEncoding('utf8');
-      socket.on('connect', () => socket.write(`${query}\r\n`));
-      socket.on('data', (chunk) => {
-        data += chunk;
+        socket.setEncoding('utf8');
+        socket.on('connect', () => socket.write(`${query}\r\n`));
+        socket.on('data', (chunk) => {
+          data += chunk;
+        });
+        socket.on('end', () => finish());
+        socket.on('error', (err) => finish(err));
       });
-      socket.on('end', () => finish());
-      socket.on('error', (err) => finish(err));
-    });
+    } catch (err) {
+      signal.throwIfAborted();
+      throw err;
+    } finally {
+      clearTimeout(timer);
+      ctx.signal?.removeEventListener('abort', onCallerAbort);
+    }
   }
 
   /** Best-effort parse of WHOIS domain text into the structured shape. */
@@ -323,11 +312,13 @@ export class RegistrationService {
       .map((m) => (m[1] ?? '').toLowerCase())
       .filter(Boolean);
     const dnssec = /^[ \t]*DNSSEC:[ \t]*(\S[^\r\n]*)$/im.exec(text)?.[1]?.trim().toLowerCase();
+    const registrarAbuseContact = domainWhoisAbuseContact(target, text, registrar);
 
     return {
       kind: 'domain',
       target,
       ...(registrar ? { registrar } : {}),
+      ...(registrarAbuseContact && { registrarAbuseContact }),
       statuses: [...new Set(statuses)],
       events,
       nameservers: [...new Set(nameservers)],
@@ -345,7 +336,7 @@ export class RegistrationService {
     const cidrMatches = [
       ...text.matchAll(/^[ \t]*(?:CIDR|inetnum|inet6num|route|route6):[ \t]*(\S[^\r\n]*)$/gim),
     ].flatMap((m) => normalizeAllocation((m[1] ?? '').trim()));
-    const asnMatches = [...text.matchAll(/^[ \t]*(?:OriginAS|origin):[ \t]*AS?(\d+)/gim)]
+    const asnMatches = [...text.matchAll(/^[ \t]*(?:OriginAS|origin):[ \t]*(?:AS)?(\d+)/gim)]
       .map((m) => Number.parseInt(m[1] ?? '', 10))
       .filter((n) => Number.isFinite(n));
     const country = /^[ \t]*(?:Country|country):[ \t]*([A-Za-z]{2})\b/im
@@ -356,6 +347,7 @@ export class RegistrationService {
       kind: 'ip',
       target,
       ...(networkName ? { networkName } : {}),
+      ...ipWhoisAttribution(target, text),
       cidrs: [...new Set(cidrMatches)],
       originAsns: [...new Set(asnMatches)],
       ...(country ? { country } : {}),

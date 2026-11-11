@@ -3,15 +3,19 @@
  * @module utils/discovery
  */
 import { z } from '@cyanheads/mcp-ts-core';
+import {
+  DnsValidationError,
+  dnsErrorCode,
+  isDnsAbsent,
+} from '@/services/dns/configured-resolver.js';
 import { literalText } from './literal-text.js';
 import { NextCallSchema } from './next-call.js';
 
 /** DNS absence or a closed TLS port is ordinary absence of the optional SAN source. */
 export function isTlsSourceAbsent(error: unknown): boolean {
   return (
-    error instanceof Error &&
-    'code' in error &&
-    ['ENOTFOUND', 'ENODATA', 'ECONNREFUSED'].includes(String(error.code))
+    isDnsAbsent(error) ||
+    (!(error instanceof DnsValidationError) && dnsErrorCode(error) === 'ECONNREFUSED')
   );
 }
 

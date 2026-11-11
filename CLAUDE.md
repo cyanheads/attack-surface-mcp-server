@@ -2,8 +2,8 @@
 
 **Server:** attack-surface-mcp-server
 **Version:** 0.5.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `0.13.18`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 
@@ -13,10 +13,10 @@
 
 ## Authorized-use posture
 
-This is a defensive external-attack-surface-mapping (EASM) server. It is **passive and non-intrusive by mandate**: it reads public records (Certificate Transparency, DNS, RDAP/WHOIS) and each target's *own* published surface (one TLS handshake, one HTTP GET per host). It does **not** port-scan, exploit, brute-force, fuzz, or probe for vulnerabilities — that capability is excluded from the surface by design, never gated behind a flag. Output is descriptive (what exists, what the posture is), never an exploitation plan.
+This is a defensive external-attack-surface-mapping (EASM) server. It is **passive and non-intrusive by mandate**: it reads public records (Certificate Transparency, DNS, RDAP/WHOIS) and each target's *own* published surface (TLS handshakes and HTTP GETs). It does **not** port-scan, exploit, brute-force, fuzz, or probe for vulnerabilities — that capability is excluded from the surface by design, never gated behind a flag. Output is descriptive (what exists, what the posture is), never an exploitation plan.
 
 - **Keep the framing in the surface.** The server `instructions`, the `attacksurface_map_domain` description, and `attacksurface_recon_guidance` all state the target must be owned or authorized for assessment. Preserve that when editing any of them. Don't add active/intrusive capability or a `mode: active` toggle — excluding it structurally is the safety property.
-- **The SSRF guard is the security spine.** Every outbound connection to a user-supplied target (DNS, TLS, HTTP) must pass `assertSafeDomain` / `assertSafeUrl` / `assertSafeResolverIp` (`src/utils/ssrf-guard.ts`) before connecting. It rejects private, loopback, link-local, cloud-metadata, and reserved ranges. Never route a new outbound path around it.
+- **The SSRF guard is the security spine.** TLS, HTTP and registration connections pass `assertSafeDomain` / `assertSafeUrl` / `resolveSafeHost` (`src/utils/ssrf-guard.ts`) before connecting. Guarded hostnames require public A/AAAA evidence from the first configured resolver and validated system answers; resolved addresses never appear in rejection text. DNS-only evidence uses explicit configured resolvers validated by `assertSafeResolverIp`, without connecting to the queried host. Private DNS answers remain evidence. Keep the trusted private-target opt-out and URL scheme validation. Never route a new connection path around the guard.
 - **No fabricated signal.** Report detections with their triggering evidence; report absent CT/DNS/RDAP fields as unknown. No invented confidence composites.
 - **Registration authority and literal evidence.** CIDRs require one decimal prefix in the family range; zone identifiers are rejected. RDAP IP paths preserve literal delimiters. WHOIS parses only recognizable authoritative referral responses, with typed `no_match` for explicit negatives and `source_unavailable` for unavailable/unsupported responses. Normalize allocation ranges to exact CIDRs while retaining invalid text in `rawWhois`. Registration/HTTP/TLS/DNS/Shodan formatters render upstream values through `literalText`; raw WHOIS uses a complete collision-safe fenced block.
 
@@ -361,7 +361,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run audit:fix` | `bun audit fix` — upgrade vulnerable packages to the lowest safe version within existing ranges (`--dry-run` previews, `--latest` rewrites ranges). First response when `devcheck` flags a transitive advisory; then `bun update <name>`, then `bun dedupe` |
 | `bun run audit:refresh` | Delete `bun.lock` and reinstall. Last resort after `audit:fix`, `bun update <name>`, and `bun dedupe` — re-resolves every ranged dep (the framework pin included) and rewrites the lockfile as `lockfileVersion: 2` |
 | `bun run lint:mcp` | Run the MCP definition linter standalone (rule catalog: `api-linter` skill) |
-| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity (run by devcheck) |
+| `bun run lint:packaging` | Check environment variable parity, `.mcpbignore` coverage, plugin manifests, and published skills (run by devcheck) |
 | `bun run list-skills` | Print the skill registry |
 | `bun run tree` | Generate directory structure doc |
 | `bun run format` | Auto-fix formatting (safe fixes only) |
@@ -379,7 +379,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. A server using DataCanvas therefore ships a portable bundle without the DuckDB native — `@duckdb/node-api` is an optional peer loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`bun run bundle` produces a stdio `.mcpb` bundle for Claude Desktop. Put every repository-only path in `.mcpbignore` with a root-anchored pattern such as `/docs/`. Root `skills/` ships with the server. After packing, `scripts/clean-mcpb.ts` prunes development dependencies, removes agent docs at each installed dependency's root and dependency `SKILL.md` files at any depth, and retains runtime modules such as the SDK's `dist/ext/skills/`. It also removes platform-specific bindings, node-gyp build artifacts, and build-only framework files. `bun run lint:packaging` checks the resulting bundle.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 

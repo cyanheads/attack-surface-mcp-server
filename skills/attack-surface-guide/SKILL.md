@@ -4,7 +4,7 @@ description: Use attacksurface_* tools for authorized external attack-surface as
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope
@@ -32,7 +32,7 @@ Before interpreting an empty or missing result:
 
 - Check DNS per-resolver errors and answers; canonical records come from the first configured resolver even when its queries fail. An empty canonical answer is not proof that every resolver found nothing.
 - Distinguish skipped inspection, failed inspection and observed absence. At quick map depth, null posture means skipped work. An unknown TLS identity or expiry is not a successful check.
-- Retain HTTP `bodyInspection` with fingerprint evidence. Limited or failed body inspection cannot establish that an undetected product is absent; available status and headers can still be useful.
+- Retain HTTP `bodyInspection` with fingerprint evidence. Limited or failed body inspection cannot establish that an undetected product is absent; available status and headers can still be useful. A transport failure before the final response supplies no header or cookie evidence.
 - Distinguish registration `source_unavailable` from authoritative `no_match`; absent or redacted fields remain unknown.
 - Treat Shodan ports and banners as dated observations. Neither an observed port nor missing Shodan data establishes a current vulnerability or current port state.
 
@@ -43,7 +43,7 @@ Before turning detections into remediation, identify the exact product version a
 1. Start with `attacksurface_map_domain` for estate discovery and posture evidence. Review its notes, per-host errors and coverage before consuming the assessment as an estate-wide result.
 2. Complete relevant omissions using `coverage.retrieval` as examples. Repeat DNS/TLS calls over successive omitted names and resubmit `remainingHosts`; probe each relevant HTTP URL separately. Preserve failed targets in the report rather than counting them as inspected successfully.
 3. Use the map's prefilled `attacksurface_recon_guidance` call to transfer observed evidence. For `guidanceCoverage.omittedHosts`, build separate findings from the corresponding map records; preserve known false/zero values and omit unknown fields instead of inventing defaults.
-4. Keep original map evidence beside guidance. The handoff includes selected TLS, missing-header, versioned-product and observed-port evidence; it does not carry every map finding. Retain identity mismatches, unversioned technologies and other findings even when guidance does not mention them.
+4. Keep original map evidence beside guidance. The handoff includes selected TLS chain and hostname-identity results, missing-header, versioned-product and observed-port evidence; it does not carry every map finding. Retain CORS observations, unversioned technologies and other findings even when guidance does not mention them.
 5. Page guidance with the original findings and topic unchanged. Advance each collection with its own next offset; when one is exhausted, use its total as that collection's offset while continuing the other.
 6. Report observations, remediation priorities and remaining coverage separately. A plan with no selected actions is bounded by the evidence supplied to guidance.
 

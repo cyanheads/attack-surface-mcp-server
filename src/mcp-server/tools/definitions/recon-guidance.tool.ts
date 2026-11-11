@@ -7,7 +7,6 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { literalText } from '@/utils/literal-text.js';
 import { NextCallSchema } from '@/utils/next-call.js';
-import { RESPONSE_BYTE_TARGET, responseBytes } from '@/utils/response-budget.js';
 import { isValidHost } from '@/utils/validation.js';
 
 /** Findings accepted by guidance and generated directly from map service evidence. */
@@ -24,6 +23,10 @@ export const FindingHostSchema = z
       .boolean()
       .optional()
       .describe('Whether the certificate chain validated.'),
+    certIdentityAuthorized: z
+      .boolean()
+      .optional()
+      .describe('Whether the certificate matched the requested hostname or IP, when known.'),
     missingSecurityHeaders: z
       .array(z.string())
       .optional()
@@ -79,10 +82,7 @@ const OutputSchema = z.object({
   suggestionTotal: z.number().describe('Selected suggestions before paging.'),
   priorityReturnedCount: z.number().describe('Priorities returned on this page.'),
   suggestionReturnedCount: z.number().describe('Suggestions returned on this page.'),
-  oversize: z
-    .boolean()
-    .describe('A complete single record or required metadata exceeds the byte target.'),
-  pageInstructions: z.string().describe('Continuation instructions and byte-target exceptions.'),
+  pageInstructions: z.string().describe('How to continue each collection independently.'),
   truncated: z.boolean().describe('Selected priorities or suggestions remain for another page.'),
 });
 type Output = z.infer<typeof OutputSchema>;
@@ -91,7 +91,7 @@ type Priority = z.infer<typeof PrioritySchema>;
 export const reconGuidanceTool = tool('attacksurface_recon_guidance', {
   title: 'attacksurface_recon_guidance',
   description:
-    'Synthesize supplied findings into an offline defensive review plan and executable local follow-up calls. triage orders all findings by urgency; posture selects TLS/header hardening; coverage selects inspection/version gaps and observed-service review. Versioned products retain host/product/version advisory-check instructions without external executable calls. Stateless pages target 24,000 serialized bytes across both response surfaces, except one complete oversized record. Makes no external calls or active scans. For assets you own or are authorized to assess.',
+    'Synthesize supplied findings into an offline defensive review plan and executable local follow-up calls. triage orders all findings by urgency; posture selects TLS/header hardening; coverage selects inspection/version gaps and observed-service review. Versioned products retain host/product/version advisory-check instructions without external executable calls. Priorities and suggested calls are paged independently, each up to the effective limit. Makes no external calls or active scans. For assets you own or are authorized to assess.',
   annotations: { readOnlyHint: true, openWorldHint: false },
   input: z.object({
     findings: z
@@ -164,6 +164,12 @@ export const reconGuidanceTool = tool('attacksurface_recon_guidance', {
             'high',
             `${h.host}: TLS chain did not validate.`,
             'Review chain trust and deploy the correct certificate and full chain.',
+          );
+        if (h.certIdentityAuthorized === false)
+          add(
+            'high',
+            `${h.host}: TLS certificate does not match the requested hostname.`,
+            'Deploy a certificate that covers the requested hostname.',
           );
         if (h.tlsProtocol && ['TLSv1', 'TLSv1.0', 'TLSv1.1', 'SSLv3'].includes(h.tlsProtocol))
           add(
@@ -239,6 +245,7 @@ export const reconGuidanceTool = tool('attacksurface_recon_guidance', {
             host.tlsProtocol !== undefined ||
             host.certDaysUntilExpiry !== undefined ||
             host.certValidationAuthorized !== undefined ||
+            host.certIdentityAuthorized !== undefined ||
             host.missingSecurityHeaders !== undefined,
         );
       add(
@@ -254,60 +261,40 @@ export const reconGuidanceTool = tool('attacksurface_recon_guidance', {
     const order = { high: 0, medium: 1, low: 2, info: 3 };
     priorities.sort((a, b) => order[a.severity] - order[b.severity]);
     const limit = Math.min(input.limit, 50);
-    const selectedP = priorities.slice(input.priorityOffset, input.priorityOffset + limit);
-    const selectedS = suggestions.slice(input.suggestionOffset, input.suggestionOffset + limit);
-    const build = (p: number, s: number, oversize = false): Output => ({
-      plan: `Defensive review${input.findings.domain ? ` — ${input.findings.domain}` : ''}. Topic: ${input.topic}; ${p} of ${priorities.length} priorities and ${s} of ${suggestions.length} local calls on this page. Assess only assets you own or are authorized to assess.`,
-      priorities: selectedP.slice(0, p),
-      nextToolSuggestions: selectedS.slice(0, s),
-      topic: input.topic,
-      limit,
-      priorityOffset: input.priorityOffset,
-      suggestionOffset: input.suggestionOffset,
-      nextPriorityOffset:
-        input.priorityOffset + p < priorities.length ? input.priorityOffset + p : null,
-      nextSuggestionOffset:
-        input.suggestionOffset + s < suggestions.length ? input.suggestionOffset + s : null,
-      priorityTotal: priorities.length,
-      suggestionTotal: suggestions.length,
-      priorityReturnedCount: p,
-      suggestionReturnedCount: s,
-      oversize,
-      pageInstructions: `Continue with the original findings and topic, using each next offset; when null, use that collection's total to keep it exhausted.${oversize ? ' One complete oversized record or required metadata exceeds the 24,000-byte target.' : ''}`,
-      truncated:
-        input.priorityOffset + p < priorities.length ||
-        input.suggestionOffset + s < suggestions.length,
-    });
-    let p = 0,
-      s = 0;
-    while (p < selectedP.length || s < selectedS.length) {
-      const nextP = p < selectedP.length ? p + 1 : p;
-      const nextS = nextP === p && s < selectedS.length ? s + 1 : s;
-      const candidate = build(nextP, nextS);
-      if (responseBytes(candidate, formatGuidance(candidate)) > RESPONSE_BYTE_TARGET) {
-        if (p + s === 0) {
-          p = nextP;
-          s = nextS;
-        }
-        break;
-      }
-      p = nextP;
-      s = nextS;
-    }
-    let result = build(p, s);
-    if (responseBytes(result, formatGuidance(result)) > RESPONSE_BYTE_TARGET)
-      result = build(p, s, true);
+    const priorityEnd = input.priorityOffset + limit;
+    const suggestionEnd = input.suggestionOffset + limit;
+    const priorityPage = priorities.slice(input.priorityOffset, priorityEnd);
+    const suggestionPage = suggestions.slice(input.suggestionOffset, suggestionEnd);
+    const nextPriorityOffset = priorityEnd < priorities.length ? priorityEnd : null;
+    const nextSuggestionOffset = suggestionEnd < suggestions.length ? suggestionEnd : null;
     ctx.log.info('Recon guidance synthesized', {
       hostCount: input.findings.hosts.length,
       priorityCount: priorities.length,
       suggestionCount: suggestions.length,
     });
-    return result;
+    return {
+      plan: `Defensive review${input.findings.domain ? ` — ${input.findings.domain}` : ''}. Topic: ${input.topic}; ${priorityPage.length} of ${priorities.length} priorities and ${suggestionPage.length} of ${suggestions.length} local calls on this page. Assess only assets you own or are authorized to assess.`,
+      priorities: priorityPage,
+      nextToolSuggestions: suggestionPage,
+      topic: input.topic,
+      limit,
+      priorityOffset: input.priorityOffset,
+      suggestionOffset: input.suggestionOffset,
+      nextPriorityOffset,
+      nextSuggestionOffset,
+      priorityTotal: priorities.length,
+      suggestionTotal: suggestions.length,
+      priorityReturnedCount: priorityPage.length,
+      suggestionReturnedCount: suggestionPage.length,
+      pageInstructions:
+        "Continue with the original findings and topic, using each next offset. When an offset is null, use that collection's total to keep it exhausted.",
+      truncated: nextPriorityOffset !== null || nextSuggestionOffset !== null,
+    };
   },
   format: formatGuidance,
 });
 
-/** Complete text twin used for actual output and byte fitting. */
+/** Render the complete guidance page and its continuation metadata. */
 function formatGuidance(result: Output): Array<{ type: 'text'; text: string }> {
   return [
     {
@@ -323,7 +310,7 @@ function formatGuidance(result: Output): Array<{ type: 'text'; text: string }> {
           (s) =>
             `${literalText(s.toolName)} — ${literalText(s.reason)}; args=${literalText(JSON.stringify(s.args))}`,
         ),
-        `topic=${result.topic}; limit=${result.limit}; priorityOffset=${result.priorityOffset}; suggestionOffset=${result.suggestionOffset}; nextPriorityOffset=${result.nextPriorityOffset}; nextSuggestionOffset=${result.nextSuggestionOffset}; priorityTotal=${result.priorityTotal}; suggestionTotal=${result.suggestionTotal}; priorityReturnedCount=${result.priorityReturnedCount}; suggestionReturnedCount=${result.suggestionReturnedCount}; oversize=${result.oversize}`,
+        `topic=${result.topic}; limit=${result.limit}; priorityOffset=${result.priorityOffset}; suggestionOffset=${result.suggestionOffset}; nextPriorityOffset=${result.nextPriorityOffset}; nextSuggestionOffset=${result.nextSuggestionOffset}; priorityTotal=${result.priorityTotal}; suggestionTotal=${result.suggestionTotal}; priorityReturnedCount=${result.priorityReturnedCount}; suggestionReturnedCount=${result.suggestionReturnedCount}`,
         `truncated=${result.truncated}; ${result.pageInstructions}`,
       ].join('\n'),
     },

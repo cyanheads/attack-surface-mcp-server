@@ -7,10 +7,25 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const dnsBoundary = vi.hoisted(() => ({ lookup: vi.fn() }));
+const dnsBoundary = vi.hoisted(() => ({
+  lookup: vi.fn(),
+  resolve4: vi.fn(),
+  resolve6: vi.fn(),
+  setServers: vi.fn(),
+  cancel: vi.fn(),
+}));
 
-vi.mock('node:dns/promises', () => ({ lookup: dnsBoundary.lookup }));
+vi.mock('node:dns/promises', () => ({
+  lookup: dnsBoundary.lookup,
+  Resolver: class {
+    resolve4 = dnsBoundary.resolve4;
+    resolve6 = dnsBoundary.resolve6;
+    setServers = dnsBoundary.setServers;
+    cancel = dnsBoundary.cancel;
+  },
+}));
 
+import { resetServerConfig } from '@/config/server-config.js';
 import {
   assertSafeDomain,
   assertSafeResolverIp,
@@ -20,10 +35,17 @@ import {
 
 beforeEach(() => {
   vi.useRealTimers();
+  resetServerConfig();
+  vi.stubEnv('ATTACKSURFACE_DEFAULT_RESOLVERS', undefined);
   dnsBoundary.lookup.mockReset();
+  dnsBoundary.resolve4.mockReset().mockResolvedValue(['8.8.8.8']);
+  dnsBoundary.resolve6.mockReset().mockResolvedValue([]);
+  dnsBoundary.setServers.mockClear();
+  dnsBoundary.cancel.mockReset();
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   delete process.env.ATTACKSURFACE_ALLOW_PRIVATE_TARGETS;
   vi.useRealTimers();
 });
@@ -125,7 +147,11 @@ describe('assertSafeResolverIp', () => {
 
 describe('assertSafeDomain', () => {
   it('preserves discovery cancellation while the host safety lookup is pending', async () => {
-    dnsBoundary.lookup.mockImplementation(() => new Promise(() => {}));
+    const ready = Promise.withResolvers<void>();
+    dnsBoundary.lookup.mockImplementation(() => {
+      if (dnsBoundary.lookup.mock.calls.length === 2) ready.resolve();
+      return new Promise(() => {});
+    });
     const controller = new AbortController();
     const domain = assertSafeDomain('example.test', controller.signal);
     const pinned = resolveSafeHost('example.test', controller.signal);
@@ -133,6 +159,7 @@ describe('assertSafeDomain', () => {
       expect(domain).rejects.toMatchObject({ name: 'AbortError' }),
       expect(pinned).rejects.toMatchObject({ name: 'AbortError' }),
     ]);
+    await ready.promise;
     controller.abort();
     await assertions;
   });
@@ -193,6 +220,107 @@ describe('assertSafeUrl', () => {
 });
 
 describe('resolveSafeHost', () => {
+  it.each(['', ' , ', '8.8.8.8,example.com', '8.8.8.8,127.0.0.1'])(
+    'refuses an unusable configured resolver list %j before querying DNS',
+    async (raw) => {
+      vi.stubEnv('ATTACKSURFACE_DEFAULT_RESOLVERS', raw);
+      await expect(resolveSafeHost('example.test')).rejects.toThrow(
+        /DNS resolver IP|private range/,
+      );
+      expect(dnsBoundary.setServers).not.toHaveBeenCalled();
+      expect(dnsBoundary.lookup).not.toHaveBeenCalled();
+    },
+  );
+
+  it('cancels the configured precheck before attempting a system lookup', async () => {
+    const controller = new AbortController();
+    const ipv4 = Promise.withResolvers<string[]>();
+    dnsBoundary.resolve4.mockReturnValue(ipv4.promise);
+    dnsBoundary.cancel.mockImplementation(() =>
+      ipv4.reject(Object.assign(new Error('cancelled resolver'), { code: 'ECANCELLED' })),
+    );
+    const pending = resolveSafeHost('example.test', controller.signal);
+    const rejection = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(dnsBoundary.resolve4).toHaveBeenCalledWith('example.test');
+    controller.abort();
+    await rejection;
+    expect(dnsBoundary.cancel).toHaveBeenCalledTimes(1);
+    expect(dnsBoundary.lookup).not.toHaveBeenCalled();
+  });
+
+  it.each(['internal.example.test', 'absent.example.test'])(
+    'reports public absence before system lookup for %s',
+    async (host) => {
+      dnsBoundary.lookup.mockImplementation((name) => {
+        if (name === 'internal.example.test') {
+          return Promise.resolve([{ address: '10.42.0.123', family: 4 }]);
+        }
+        return Promise.reject(
+          Object.assign(new Error('system lookup failed'), { code: 'ENOTFOUND' }),
+        );
+      });
+      dnsBoundary.resolve4.mockRejectedValue(
+        Object.assign(new Error('no answer'), { code: 'ENOTFOUND' }),
+      );
+      await expect(resolveSafeHost(host)).rejects.toMatchObject({ code: 'ENOTFOUND' });
+      expect(dnsBoundary.lookup).not.toHaveBeenCalled();
+      expect(dnsBoundary.setServers).toHaveBeenCalledWith(['8.8.8.8']);
+    },
+  );
+
+  it('rejects a non-public answer from either public DNS family before system lookup', async () => {
+    dnsBoundary.resolve6.mockResolvedValue(['fd12:3456::1']);
+    dnsBoundary.lookup.mockResolvedValue([{ address: '8.8.8.8', family: 4 }]);
+    await expect(resolveSafeHost('example.test')).rejects.toThrow(/SSRF_BLOCKED/);
+    expect(dnsBoundary.lookup).not.toHaveBeenCalled();
+  });
+
+  it('rejects operational public DNS failures even alongside a public answer', async () => {
+    dnsBoundary.resolve6.mockRejectedValue(
+      Object.assign(new Error('resolver failed'), { code: 'ESERVFAIL' }),
+    );
+    dnsBoundary.lookup.mockResolvedValue([{ address: '8.8.8.8', family: 4 }]);
+    await expect(resolveSafeHost('example.test')).rejects.toMatchObject({ code: 'ESERVFAIL' });
+    expect(dnsBoundary.lookup).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the system lookup cannot provide a validated address', async () => {
+    dnsBoundary.lookup.mockRejectedValue(
+      Object.assign(new Error('lookup failed'), { code: 'EAI_AGAIN' }),
+    );
+    await expect(resolveSafeHost('example.test')).rejects.toMatchObject({ code: 'EAI_AGAIN' });
+  });
+
+  it.each(['empty', 'ENOTFOUND'])(
+    'rejects system DNS absence (%s) despite a public configured answer',
+    async (absence) => {
+      dnsBoundary.resolve4.mockResolvedValue(['8.8.8.8']);
+      if (absence === 'empty') dnsBoundary.lookup.mockResolvedValue([]);
+      else {
+        dnsBoundary.lookup.mockRejectedValue(
+          Object.assign(new Error('no system answer'), { code: 'ENOTFOUND' }),
+        );
+      }
+      await expect(resolveSafeHost('example.test')).rejects.toMatchObject({ code: 'ENOTFOUND' });
+      expect(dnsBoundary.lookup).toHaveBeenCalledWith('example.test', { all: true });
+    },
+  );
+
+  it('bounds a stalled system lookup and clears the deadline', async () => {
+    vi.useFakeTimers();
+    const ready = Promise.withResolvers<void>();
+    dnsBoundary.lookup.mockImplementation(() => {
+      ready.resolve();
+      return new Promise(() => {});
+    });
+    const pending = resolveSafeHost('example.test');
+    const rejection = expect(pending).rejects.toMatchObject({ code: 'ETIMEOUT' });
+    await ready.promise;
+    await vi.runAllTimersAsync();
+    await rejection;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('throws on a private literal rather than returning it', async () => {
     await expect(resolveSafeHost('127.0.0.1')).rejects.toThrow(/SSRF_BLOCKED/);
     await expect(resolveSafeHost('169.254.169.254')).rejects.toThrow(/SSRF_BLOCKED/);
@@ -234,6 +362,8 @@ describe('resolveSafeHost', () => {
       { address: '104.26.10.117', family: 4 },
       { address: '10.0.0.5', family: 4 },
     ]);
-    await expect(resolveSafeHost('example.test')).rejects.toThrow(/SSRF_BLOCKED.*10\.0\.0\.5/);
+    const pending = resolveSafeHost('example.test');
+    await expect(pending).rejects.toThrow(/SSRF_BLOCKED/);
+    await expect(pending).rejects.not.toThrow('10.0.0.5');
   });
 });
