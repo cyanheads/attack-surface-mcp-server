@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-11-11 · ⚠️ Breaking · 🛡️ Security
+
+Guarded connections validate hostnames through configured DNS, and assessment tools return complete evidence within their item limits.
+
 ## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-10-30
 
 Publish a defensive assessment guide over MCP, preserve raw domain text in structured guidance, and retain SDK skill modules in desktop bundles.
