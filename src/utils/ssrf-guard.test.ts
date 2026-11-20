@@ -220,7 +220,26 @@ describe('assertSafeUrl', () => {
 });
 
 describe('resolveSafeHost', () => {
-  it.each(['', ' , ', '8.8.8.8,example.com', '8.8.8.8,127.0.0.1'])(
+  it('uses the first explicitly configured resolver for the hostname precheck', async () => {
+    vi.stubEnv('ATTACKSURFACE_DEFAULT_RESOLVERS', '1.1.1.1,8.8.8.8');
+    dnsBoundary.lookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
+
+    await expect(resolveSafeHost('example.test')).resolves.toBe('93.184.216.34');
+    expect(dnsBoundary.setServers.mock.calls).toEqual([[['1.1.1.1']]]);
+  });
+
+  it.each([undefined, '', ' \t ', `\${ATTACKSURFACE_DEFAULT_RESOLVERS}`])(
+    'uses the default configured DNS precheck for absent resolver input %j',
+    async (raw) => {
+      vi.stubEnv('ATTACKSURFACE_DEFAULT_RESOLVERS', raw);
+      dnsBoundary.lookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
+
+      await expect(resolveSafeHost('example.test')).resolves.toBe('93.184.216.34');
+      expect(dnsBoundary.setServers.mock.calls).toEqual([[['8.8.8.8']]]);
+    },
+  );
+
+  it.each([' , ', '8.8.8.8,example.com', '8.8.8.8,127.0.0.1'])(
     'refuses an unusable configured resolver list %j before querying DNS',
     async (raw) => {
       vi.stubEnv('ATTACKSURFACE_DEFAULT_RESOLVERS', raw);

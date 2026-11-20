@@ -130,13 +130,15 @@ export const resolveDnsTool = tool('attacksurface_resolve_dns', {
   ],
 
   async handler(input, ctx) {
-    for (const host of input.hosts) {
-      if (!isValidHost(host)) {
+    const hosts = input.hosts.map((host) => {
+      const trimmed = host.trim();
+      if (!isValidHost(trimmed)) {
         throw ctx.fail('invalid_host', `"${host}" is not a valid hostname or IP.`, {
           ...ctx.recoveryFor('invalid_host'),
         });
       }
-    }
+      return trimmed;
+    });
 
     const config = getServerConfig();
     const resolvers =
@@ -168,7 +170,7 @@ export const resolveDnsTool = tool('attacksurface_resolve_dns', {
       input.recordTypes && input.recordTypes.length > 0 ? input.recordTypes : ALL_RECORD_TYPES;
 
     const results = await getDnsService().resolveHosts(
-      input.hosts.slice(0, 50),
+      hosts.slice(0, 50),
       types,
       resolvers,
       input.reverse,

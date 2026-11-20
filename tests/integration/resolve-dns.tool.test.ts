@@ -100,6 +100,41 @@ describe('attacksurface_resolve_dns', () => {
     expect(JSON.stringify(result.content)).toContain('resolver unavailable');
   });
 
+  it('trims a hostname from the exact continuation before resolving it', async () => {
+    const host = 'api.example.com';
+    const padded = ` ${host} `;
+    dnsBoundary.query.mockImplementation(async (_type, name) => {
+      if (name === host) return ['93.184.216.34'];
+      throw dnsError('ENOTFOUND');
+    });
+    const input = { recordTypes: ['A' as const], resolvers: ['8.8.8.8'] };
+    const first = await runToolContract(resolveDnsTool, {
+      ...input,
+      hosts: Array.from({ length: 50 }, () => host).concat(padded),
+    });
+    const page = resolveDnsTool.output.parse(first.structuredContent);
+    expect(page.remainingHosts).toEqual([padded]);
+    expect(first.content).toContainEqual({
+      type: 'text',
+      text: expect.stringContaining(`\` ${padded} \``),
+    });
+    expect(dnsBoundary.query).toHaveBeenCalledTimes(50);
+
+    dnsBoundary.query.mockClear();
+    const next = await runToolContract(resolveDnsTool, { ...input, hosts: page.remainingHosts });
+    expect(next.structuredContent).toMatchObject({
+      results: [{ host, resolved: true, records: { A: ['93.184.216.34'] }, hostError: null }],
+      processedCount: 1,
+      remainingHosts: [],
+    });
+    expect(dnsBoundary.query.mock.calls).toEqual([['A', host, '8.8.8.8']]);
+    expect(next.content).toContainEqual({
+      type: 'text',
+      text: expect.stringContaining('**Resolved:** yes'),
+    });
+    expect(JSON.stringify(next.content)).toContain('93.184.216.34');
+  });
+
   it('returns schema-valid records, resolver details, reverse PTRs, and complete format output', async () => {
     dnsBoundary.query.mockImplementation(async (type) => {
       if (type === 'A') return ['93.184.216.34'];

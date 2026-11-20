@@ -10,12 +10,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 interface Scenario {
   error?: Error;
-  mode: 'success' | 'error';
+  mode: 'success' | 'error' | 'pending';
   validTo?: string;
 }
 
-const tlsBoundary = vi.hoisted(() => ({ connect: vi.fn(), scenarios: [] as Scenario[] }));
-const dnsBoundary = vi.hoisted(() => ({ lookup: vi.fn() }));
+const tlsBoundary = vi.hoisted(() => ({
+  connect: vi.fn(),
+  destroy: vi.fn(),
+  scenarios: [] as Scenario[],
+}));
+const dnsBoundary = vi.hoisted(() => ({ cancel: vi.fn(), lookup: vi.fn(), resolve4: vi.fn() }));
 vi.mock('node:tls', async (original) => ({
   ...(await original<typeof import('node:tls')>()),
   connect: tlsBoundary.connect,
@@ -24,9 +28,8 @@ vi.mock('node:dns/promises', () => ({
   lookup: dnsBoundary.lookup,
   Resolver: class {
     setServers() {}
-    async resolve4() {
-      throw Object.assign(new Error('no public answer'), { code: 'ENOTFOUND' });
-    }
+    resolve4 = dnsBoundary.resolve4;
+    cancel = dnsBoundary.cancel;
     async resolve6() {
       return [];
     }
@@ -48,10 +51,13 @@ class FakeSocket extends EventEmitter {
   ) {
     super();
     if (scenario.mode === 'success') queueMicrotask(callback);
-    else queueMicrotask(() => this.emit('error', scenario.error ?? new Error('TLS failed')));
+    if (scenario.mode === 'error')
+      queueMicrotask(() => this.emit('error', scenario.error ?? new Error('TLS failed')));
   }
 
-  destroy() {}
+  destroy() {
+    tlsBoundary.destroy();
+  }
 
   getCipher() {
     return { standardName: 'TLS_AES_128_GCM_SHA256' };
@@ -75,8 +81,11 @@ class FakeSocket extends EventEmitter {
   }
 }
 
-function context(): HandlerCtx {
-  return createMockContext({ errors: inspectTlsTool.errors ?? [] }) as HandlerCtx;
+function context(signal?: AbortSignal): HandlerCtx {
+  return createMockContext({
+    errors: inspectTlsTool.errors ?? [],
+    ...(signal ? { signal } : {}),
+  }) as HandlerCtx;
 }
 
 describe('attacksurface_inspect_tls', () => {
@@ -84,12 +93,17 @@ describe('attacksurface_inspect_tls', () => {
     vi.stubEnv('ATTACKSURFACE_ALLOW_PRIVATE_TARGETS', 'true');
     initTlsService();
     tlsBoundary.scenarios.length = 0;
+    tlsBoundary.destroy.mockClear();
     tlsBoundary.connect.mockReset();
     tlsBoundary.connect.mockImplementation((_options, callback) => {
       const scenario = tlsBoundary.scenarios.shift();
       if (!scenario) throw new Error('Missing fake TLS scenario');
       return new FakeSocket(scenario, callback);
     });
+    dnsBoundary.cancel.mockReset();
+    dnsBoundary.resolve4
+      .mockReset()
+      .mockRejectedValue(Object.assign(new Error('no public answer'), { code: 'ENOTFOUND' }));
   });
 
   afterEach(() => {
@@ -156,6 +170,106 @@ describe('attacksurface_inspect_tls', () => {
       inspectTlsTool.input.safeParse({ hosts: ['example.com'], port: 65_535, timeoutMs: 30_000 })
         .success,
     ).toBe(true);
+  });
+
+  it('trims a hostname from the exact continuation before using it for DNS and TLS SNI', async () => {
+    const host = 'secure.example.com';
+    const padded = ` ${host} `;
+    tlsBoundary.scenarios.push(...Array.from({ length: 50 }, () => ({ mode: 'success' as const })));
+    const first = await runToolContract(inspectTlsTool, {
+      hosts: Array.from({ length: 50 }, () => host).concat(padded),
+    });
+    const page = inspectTlsTool.output.parse(first.structuredContent);
+    expect(page.remainingHosts).toEqual([padded]);
+    expect(first.content).toContainEqual({
+      type: 'text',
+      text: expect.stringContaining(`\` ${padded} \``),
+    });
+    expect(tlsBoundary.connect).toHaveBeenCalledTimes(50);
+
+    vi.stubEnv('ATTACKSURFACE_ALLOW_PRIVATE_TARGETS', 'false');
+    dnsBoundary.resolve4.mockImplementation(async (name) => {
+      if (name === host) return ['93.184.216.34'];
+      throw Object.assign(new Error('no public answer'), { code: 'ENOTFOUND' });
+    });
+    dnsBoundary.lookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
+    tlsBoundary.scenarios.push({ mode: 'success' });
+    const next = await runToolContract(inspectTlsTool, { hosts: page.remainingHosts });
+    expect(next.structuredContent).toMatchObject({
+      results: [{ host, protocol: 'TLSv1.3', handshakeError: null, identityAuthorized: true }],
+      processedCount: 1,
+      remainingHosts: [],
+    });
+    expect(dnsBoundary.resolve4.mock.calls).toEqual([[host]]);
+    expect(tlsBoundary.connect).toHaveBeenLastCalledWith(
+      expect.objectContaining({ host: '93.184.216.34', servername: host }),
+      expect.any(Function),
+    );
+    expect(JSON.stringify(next.content)).toContain(`${host}:443`);
+    expect(JSON.stringify(next.content)).toContain('TLSv1.3');
+  });
+
+  it('rejects a pre-aborted request before DNS or socket work', async () => {
+    vi.stubEnv('ATTACKSURFACE_ALLOW_PRIVATE_TARGETS', 'false');
+    const reason = new Error('caller cancelled before TLS inspection');
+    const input = inspectTlsTool.input.parse({ hosts: ['secure.example.com'] });
+    const signal = AbortSignal.abort(reason);
+
+    await expect(inspectTlsTool.handler(input, context(signal))).rejects.toBe(reason);
+    expect(dnsBoundary.resolve4).not.toHaveBeenCalled();
+    expect(tlsBoundary.connect).not.toHaveBeenCalled();
+  });
+
+  it('cancels the configured resolver when the caller aborts during DNS', async () => {
+    vi.useFakeTimers();
+    vi.stubEnv('ATTACKSURFACE_ALLOW_PRIVATE_TARGETS', 'false');
+    const controller = new AbortController();
+    const reason = new Error('caller cancelled during DNS');
+    const response = Promise.withResolvers<string[]>();
+    dnsBoundary.resolve4.mockReturnValue(response.promise);
+    dnsBoundary.cancel.mockImplementation(() =>
+      response.reject(Object.assign(new Error('resolver cancelled'), { code: 'ECANCELLED' })),
+    );
+    const input = inspectTlsTool.input.parse({ hosts: ['secure.example.com'] });
+    const pending = inspectTlsTool.handler(input, context(controller.signal));
+    const rejected = Promise.resolve(pending).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect(dnsBoundary.resolve4).toHaveBeenCalledWith('secure.example.com');
+    controller.abort(reason);
+    response.resolve([]);
+    expect(await rejected).toBe(reason);
+    expect(dnsBoundary.cancel).toHaveBeenCalledTimes(1);
+    expect(tlsBoundary.connect).not.toHaveBeenCalled();
+  });
+
+  it('destroys the socket and clears its timer when the caller aborts during the handshake', async () => {
+    vi.useFakeTimers();
+    tlsBoundary.scenarios.push({ mode: 'pending' });
+    const controller = new AbortController();
+    const reason = new Error('caller cancelled during TLS handshake');
+    const input = inspectTlsTool.input.parse({ hosts: ['secure.example.com'], timeoutMs: 1000 });
+    const pending = runToolContract(inspectTlsTool, input, {
+      context: { signal: controller.signal },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tlsBoundary.connect).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
+
+    controller.abort(reason);
+    const timersAfterAbort = vi.getTimerCount();
+    const destroysAfterAbort = tlsBoundary.destroy.mock.calls.length;
+    await vi.runAllTimersAsync();
+    const result = await pending;
+
+    expect(timersAfterAbort).toBe(0);
+    expect(destroysAfterAbort).toBe(1);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.RequestCancelled, message: reason.message },
+    });
+    expect(JSON.stringify(result.content)).toContain(reason.message);
   });
 
   it.each([1, 50, 51, 1000])(
