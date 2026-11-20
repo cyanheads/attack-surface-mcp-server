@@ -57,7 +57,7 @@ All resource data is also reachable via tools — tool-only clients lose nothing
 
 ### `attacksurface_map_domain` <sub>tool</sub>
 
-- `depth`: `quick` discovers subdomains and liveness; `standard` adds DNS records, TLS, and HTTP posture; `thorough` adds per-IP Shodan data when a key is present, otherwise a note.
+- `depth`: `quick` discovers subdomains and liveness; `standard` adds DNS records, TLS, and HTTP posture; `thorough` adds per-IP Shodan port and scan-date observations when a key is present, otherwise a note. The existing Shodan summary describes the first successful lookup; guidance combines the observed ports across all addresses.
 - Returns a structured surface map and a defensive `assessment` of observable facts. Failed sources and unreachable hosts become notes, and subdomain resolution is capped by `ATTACKSURFACE_MAX_SUBDOMAINS` (default 200), with truncation disclosed.
 - `includeRegistration` adds RDAP/WHOIS data for the apex at standard or thorough depth. Standard and thorough also return DNS records from the first configured resolver plus propagation mismatches for live hosts; null posture at quick depth means the work was skipped.
 - `coverage` lists what was left unexamined or without host detail (`unexamined`, `detailOmitted`), and `retrieval` gives up to three ready-to-run follow-up calls (DNS/TLS batches of at most 50 hosts, one HTTP URL). `nextToolSuggestions` prefills an `attacksurface_recon_guidance` call for up to 50 hosts, with `guidanceCoverage` naming any omitted.
@@ -74,7 +74,7 @@ All resource data is also reachable via tools — tool-only clients lose nothing
 
 ### `attacksurface_resolve_dns` <sub>tool</sub>
 
-- Accepts 1–1000 hosts and processes the first 50 in input order; `processedCount` and `remainingHosts` show what to resubmit. Queries A, AAAA, CNAME, MX, NS, TXT, and CAA across public resolvers (default `8.8.8.8`, `1.1.1.1`, `9.9.9.9`); reverse DNS (PTR) is optional.
+- Accepts 1–1000 hosts, trims surrounding whitespace, and processes the first 50 in input order; `processedCount` and the exact original `remainingHosts` suffix show what to resubmit. Queries A, AAAA, CNAME, MX, NS, TXT, and CAA across public resolvers (default `8.8.8.8`, `1.1.1.1`, `9.9.9.9`); reverse DNS (PTR) is optional.
 - Returns per-resolver answers to expose propagation gaps, with canonical records from the first configured resolver. Resolver failures (including SERVFAIL) appear in `queryError` and `hostError` next to any successful records. When neither A nor AAAA is requested, separate first-resolver address checks supply `resolved` and optional PTR without adding records to the requested maps. PTR uses the first resolver selected for the call.
 - DNS-only queries report public DNS evidence, including private-range answers, without connecting to the queried host. Discovery liveness uses the first server-configured resolver.
 - Private or loopback resolver IPs produce `blocked_resolver`; an individual host failure becomes a per-host error.
@@ -83,7 +83,7 @@ All resource data is also reachable via tools — tool-only clients lose nothing
 
 ### `attacksurface_inspect_tls` <sub>tool</sub>
 
-- Accepts 1–1000 hosts and processes the first 50 in input order; `processedCount` and `remainingHosts` show what to resubmit. Port defaults to 443 and handshake timeout to 8000ms (1000–30000ms).
+- Accepts 1–1000 hosts, trims surrounding whitespace, and processes the first 50 in input order; `processedCount` and the exact original `remainingHosts` suffix show what to resubmit. Port defaults to 443 and handshake timeout to 8000ms (1000–30000ms). Caller cancellation stops pending DNS or handshake work and cancels the call.
 - Returns negotiated protocol, cipher, leaf certificate and chain depth, SANs, issuer, validity window, days to expiry, and validation status. Invalid, expired, and self-signed certificates are reported; one host failure becomes a per-host error.
 - Chain trust (`validationAuthorized`/`validationError`) and hostname match (`identityAuthorized`/`identityError`) are separate checks. `daysUntilExpiry` is null only when the expiry date cannot be parsed.
 
@@ -92,7 +92,7 @@ All resource data is also reachable via tools — tool-only clients lose nothing
 ### `attacksurface_probe_http` <sub>tool</sub>
 
 - Accepts one HTTP(S) URL; malformed URLs produce `invalid_url`. Timeout defaults to 10000ms (1000–30000ms) and covers the whole probe. Follows up to ten redirects with an SSRF check at every hop. A disallowed address or scheme produces `blocked_target`. DNS safety-check failures and redirect exhaustion return `finalStatus: 0` with a `transportError`.
-- Returns status, redirect chain, raw headers, security-header findings (HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy, cookie flags, CORS reflection), and technology detections with their triggering evidence. CSP analysis covers `frame-ancestors` only.
+- Returns status, redirect chain, raw headers, security-header findings (HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy, cookie flags, CORS reflection), and technology detections with their triggering evidence. CMS versions come from the matched generator marker, not unrelated page text. CSP analysis covers `frame-ancestors` only.
 - `bodyInspection` reports `complete`, `limited` (64,000-byte prefix cap), `failed`, or `not_read`; a body failure keeps the status and headers.
 - Without a final response, headers, cookies and CORS are unobserved and the audit has no findings. CORS findings retain the exact credentials header and distinguish exact `true`; a final plain-HTTP response is reported after redirects. These are observed configuration facts, not exploitability claims.
 
@@ -116,7 +116,7 @@ All resource data is also reachable via tools — tool-only clients lose nothing
 
 ### `attacksurface_recon_guidance` <sub>tool</sub>
 
-- Takes prior findings (hosts, certificates, missing headers, software versions, ports). Topic `triage` covers all findings ordered by urgency, `posture` covers TLS/header hardening, and `coverage` covers inspection and version gaps. Certificate chain trust and hostname identity remain separate findings, including in the map handoff. Open ports are inventory evidence, never proof of a vulnerability.
+- Takes prior findings (hosts, certificates, missing headers, software versions, ports). Host identifiers must be nonblank; omitted or blank TLS protocols mean unknown. Topic `triage` covers all findings ordered by urgency, `posture` covers TLS/header hardening, and `coverage` covers inspection and version gaps. Certificate chain trust and hostname identity remain separate findings, including in the map handoff. Open ports are inventory evidence, never proof of a vulnerability.
 - Returns `priorities` plus suggestions as `{toolName, reason, args}` that target local tools only; no external calls or active scans are emitted.
 - `priorityOffset` and `suggestionOffset` page independently with `limit` (default 50, max 50). Resubmit the original findings and topic with the next offsets.
 
@@ -176,7 +176,7 @@ All variables are optional — the server boots and delivers its keyless core wi
 |:---------|:------------|:--------|
 | `SHODAN_API_KEY` | Enables `attacksurface_lookup_host`. Absent → that tool returns `source_unavailable`; every other tool keeps working. | — |
 | `CERTSPOTTER_API_KEY` | Raises Certspotter rate limits for the CT-log subdomain fallback. Absent → free unauthenticated tier (rate-limited but functional). | — |
-| `ATTACKSURFACE_DEFAULT_RESOLVERS` | Comma-separated public DNS resolver IPs for DNS evidence and map/snapshot posture. The first also supplies discovery liveness, PTR and the public DNS precheck for guarded connections. When set, provide at least one valid resolver IP. | `8.8.8.8,1.1.1.1,9.9.9.9` |
+| `ATTACKSURFACE_DEFAULT_RESOLVERS` | Comma-separated public DNS resolver IPs for DNS evidence and map/snapshot posture. The first also supplies discovery liveness, PTR and the public DNS precheck for guarded connections. Unset, blank and unexpanded placeholder values use the default; an explicit list must contain valid resolver IPs. | `8.8.8.8,1.1.1.1,9.9.9.9` |
 | `ATTACKSURFACE_HTTP_USER_AGENT` | Default User-Agent for `attacksurface_probe_http` (overridable per call). | `attack-surface-mcp-server/passive-recon (+https://github.com/cyanheads/attack-surface-mcp-server)` |
 | `ATTACKSURFACE_MAX_SUBDOMAINS` | Map/snapshot resolution cap; enumeration also caps each page at 50 candidates. | `200` |
 | `ATTACKSURFACE_RDAP_BOOTSTRAP_URL` | RDAP bootstrap base URL; override for a private/mirrored RDAP. | `https://rdap.org` |

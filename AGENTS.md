@@ -18,7 +18,7 @@ This is a defensive external-attack-surface-mapping (EASM) server. It is **passi
 - **Keep the framing in the surface.** The server `instructions`, the `attacksurface_map_domain` description, and `attacksurface_recon_guidance` all state the target must be owned or authorized for assessment. Preserve that when editing any of them. Don't add active/intrusive capability or a `mode: active` toggle — excluding it structurally is the safety property.
 - **The SSRF guard is the security spine.** TLS, HTTP and registration connections pass `assertSafeDomain` / `assertSafeUrl` / `resolveSafeHost` (`src/utils/ssrf-guard.ts`) before connecting. Guarded hostnames require public A/AAAA evidence from the first configured resolver and validated system answers; resolved addresses never appear in rejection text. DNS-only evidence uses explicit configured resolvers validated by `assertSafeResolverIp`, without connecting to the queried host. Private DNS answers remain evidence. Keep the trusted private-target opt-out and URL scheme validation. Never route a new connection path around the guard.
 - **No fabricated signal.** Report detections with their triggering evidence; report absent CT/DNS/RDAP fields as unknown. No invented confidence composites.
-- **Registration authority and literal evidence.** CIDRs require one decimal prefix in the family range; zone identifiers are rejected. RDAP IP paths preserve literal delimiters. WHOIS parses only recognizable authoritative referral responses, with typed `no_match` for explicit negatives and `source_unavailable` for unavailable/unsupported responses. Normalize allocation ranges to exact CIDRs while retaining invalid text in `rawWhois`. Registration/HTTP/TLS/DNS/Shodan formatters render upstream values through `literalText`; raw WHOIS uses a complete collision-safe fenced block.
+- **Registration authority and literal evidence.** CIDRs require one decimal prefix in the family range; zone identifiers are rejected. RDAP IP paths preserve literal delimiters. WHOIS parses only recognizable authoritative referral responses, with typed `no_match` for explicit negatives and `source_unavailable` for unavailable/unsupported responses. Normalize allocation ranges to exact CIDRs while retaining invalid text in `rawWhois`. Registration/HTTP/TLS/DNS/Shodan/map formatters render upstream values through `literalText`; raw WHOIS uses a complete collision-safe fenced block.
 
 ---
 
@@ -69,15 +69,17 @@ export const inspectTlsTool = tool('attacksurface_inspect_tls', {
   ],
 
   async handler(input, ctx) {
-    for (const host of input.hosts) {
-      if (!isValidHost(host)) {
+    const hosts = input.hosts.map((host) => {
+      const trimmed = host.trim();
+      if (!isValidHost(trimmed)) {
         throw ctx.fail('invalid_host', `"${host}" is not a valid hostname or IP.`, {
           ...ctx.recoveryFor('invalid_host'),
         });
       }
-    }
-    // The service SSRF-checks each host before connecting; one failing host → per-host error, not a throw.
-    const results = await getTlsService().inspectHosts(input.hosts.slice(0, 50), input.port);
+      return trimmed;
+    });
+    // The service SSRF-checks each host; host failures become results, caller cancellation throws.
+    const results = await getTlsService().inspectHosts(hosts.slice(0, 50), input.port, undefined, ctx.signal);
     return { results, processedCount: Math.min(input.hosts.length, 50), remainingHosts: input.hosts.slice(50) };
   },
 
