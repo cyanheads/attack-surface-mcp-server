@@ -72,6 +72,35 @@ describe('attacksurface_probe_http', () => {
     }
   });
 
+  it('reports matching generator versions and evidence on both output surfaces', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        '<title>WordPress 4.0 migration notes and Drupal 8.0</title><meta name="generator" content="WordPress 6.8.3"><meta name="generator" content="Drupal">',
+      ),
+    );
+    const result = await runToolContract(probeHttpTool, { url: 'https://example.com' });
+    expect(probeHttpTool.output.parse(result.structuredContent).technologies).toEqual([
+      {
+        name: 'WordPress',
+        category: 'cms',
+        version: '6.8.3',
+        evidence: 'body marker: <meta name="generator" content="WordPress 6.8.3',
+      },
+      {
+        name: 'Drupal',
+        category: 'cms',
+        evidence: 'body marker: <meta name="generator" content="Drupal',
+      },
+    ]);
+    const text = result.content[0];
+    expect(text?.type).toBe('text');
+    if (text?.type !== 'text') return;
+    expect(text.text).toContain('`WordPress` `6.8.3`');
+    expect(text.text).toContain('`Drupal`');
+    expect(text.text).toContain('body marker: <meta name="generator" content="WordPress 6.8.3');
+    expect(text.text).not.toContain('8.0');
+  });
+
   it('enforces URL and timeout schema boundaries', () => {
     expect(probeHttpTool.input.safeParse({ url: '', timeoutMs: 1_000 }).success).toBe(false);
     expect(

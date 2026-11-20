@@ -21,9 +21,9 @@ interface HeaderRule {
 /** A body-marker fingerprint rule (applied to a bounded prefix of the body). */
 interface BodyRule {
   category: TechDetection['category'];
+  /** The optional first capture is the version carried by this marker. */
   marker: RegExp;
   name: string;
-  version?: RegExp;
 }
 
 const HEADER_RULES: HeaderRule[] = [
@@ -77,14 +77,12 @@ const BODY_RULES: BodyRule[] = [
     marker: /<meta[^>]+name=["']generator["'][^>]+content=["']WordPress\s*([\d.]+)?/i,
     name: 'WordPress',
     category: 'cms',
-    version: /WordPress\s*([\d.]+)/i,
   },
-  { marker: /\/wp-(content|includes)\//i, name: 'WordPress', category: 'cms' },
+  { marker: /\/wp-(?:content|includes)\//i, name: 'WordPress', category: 'cms' },
   {
     marker: /<meta[^>]+name=["']generator["'][^>]+content=["']Drupal\s*([\d.]+)?/i,
     name: 'Drupal',
     category: 'cms',
-    version: /Drupal\s*([\d.]+)/i,
   },
   {
     marker: /<meta[^>]+name=["']generator["'][^>]+content=["']Joomla/i,
@@ -97,7 +95,6 @@ const BODY_RULES: BodyRule[] = [
     marker: /ng-version=["']([\d.]+)["']/i,
     name: 'Angular',
     category: 'framework',
-    version: /ng-version=["']([\d.]+)["']/i,
   },
   {
     marker: /data-reactroot|react(?:-dom)?\.production\.min\.js/i,
@@ -145,14 +142,14 @@ export function fingerprint(headers: Record<string, string>, bodyPrefix: string)
   }
 
   for (const rule of BODY_RULES) {
-    if (!rule.marker.test(bodyPrefix)) continue;
-    const matched = rule.marker.exec(bodyPrefix)?.[0] ?? rule.marker.source;
-    const version = extractVersion(bodyPrefix, rule.version);
+    const match = rule.marker.exec(bodyPrefix);
+    if (!match) continue;
+    const [marker, version] = match;
     add({
       name: rule.name,
       category: rule.category,
       ...(version ? { version } : {}),
-      evidence: `body marker: ${matched.slice(0, 80)}`,
+      evidence: `body marker: ${marker.slice(0, 80)}`,
     });
   }
 

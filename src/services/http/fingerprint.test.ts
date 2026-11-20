@@ -71,6 +71,33 @@ describe('fingerprint', () => {
     expect(wp?.evidence).toContain('body marker');
   });
 
+  it('detects Angular from a body marker with its version', () => {
+    expect(fingerprint({}, '<app-root ng-version="21.0.1">')).toEqual([
+      {
+        name: 'Angular',
+        category: 'framework',
+        version: '21.0.1',
+        evidence: 'body marker: ng-version="21.0.1"',
+      },
+    ]);
+  });
+
+  it.each([
+    ['WordPress', '6.8.3'],
+    ['Drupal', '10.5.2'],
+  ])('uses the first %s generator marker for both version and evidence', (name, version) => {
+    const prose = `<title>${name} 4.0 migration notes</title>`;
+    const versioned = `<meta name="generator" content="${name} ${version}">`;
+    const versionless = `<meta name="generator" content="${name}">`;
+    expect(fingerprint({}, prose + versioned)).toEqual([
+      { name, category: 'cms', version, evidence: `body marker: ${versioned.slice(0, -2)}` },
+    ]);
+    expect(fingerprint({}, versionless + prose + versioned)).toEqual([
+      { name, category: 'cms', evidence: `body marker: ${versionless.slice(0, -2)}` },
+    ]);
+    expect(fingerprint({}, prose)).toEqual([]);
+  });
+
   it('detects Next.js from a body marker', () => {
     const hits = fingerprint({}, '<script id="__NEXT_DATA__">{}</script>');
     expect(hits.some((h) => h.name === 'Next.js')).toBe(true);
