@@ -22,7 +22,6 @@ import type { HttpProbeResult } from '@/services/http/types.js';
 import { getRegistrationService } from '@/services/registration/registration-service.js';
 import type { DomainRegistration, IpRegistration } from '@/services/registration/types.js';
 import { getShodanService } from '@/services/shodan/shodan-service.js';
-import type { ShodanHostResult } from '@/services/shodan/types.js';
 import { getTlsService } from '@/services/tls/tls-service.js';
 import type { TlsResult } from '@/services/tls/types.js';
 import {
@@ -120,8 +119,23 @@ const LiveHostSchema = z
       .describe('HTTP posture summary (standard+ depth), or null when not probed/unreachable.'),
     shodan: z
       .object({
-        ports: z.array(z.number()).describe("Open ports per Shodan's last scan."),
-        lastUpdate: z.string().optional().describe('Shodan scan timestamp.'),
+        ports: z.array(z.number()).describe('Ports from the first successful Shodan lookup.'),
+        lastUpdate: z
+          .string()
+          .optional()
+          .describe('Scan timestamp for the first successful lookup.'),
+        observations: z
+          .array(
+            z
+              .object({
+                ip: z.string().describe('Resolved IP queried in Shodan.'),
+                ports: z.array(z.number()).describe('Ports observed by Shodan on this IP.'),
+                lastUpdate: z.string().optional().describe('Shodan scan timestamp for this IP.'),
+              })
+              .describe('Successful Shodan lookup for one resolved IP.'),
+          )
+          .optional()
+          .describe('Shodan observations for every successfully queried address.'),
       })
       .nullable()
       .describe('Shodan enrichment (thorough depth + key), or null otherwise.'),
@@ -449,7 +463,7 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
 
     if (result.assessment.length > 0) {
       lines.push('## Assessment (observable findings)');
-      for (const a of result.assessment) lines.push(`- ${a}`);
+      for (const a of result.assessment) lines.push(`- ${literalText(a)}`);
     }
 
     lines.push('## Live hosts');
@@ -460,31 +474,32 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
       lines.push(`**Leg errors:** ${literalText(JSON.stringify(h.errors))}`);
       if (h.tls) {
         lines.push(
-          `**TLS:** ${h.tls.protocol ?? 'unknown'} / ${h.tls.cipher ?? 'unknown'} · issuer ${h.tls.issuer ?? 'unknown'} · ${h.tls.daysUntilExpiry ?? 'unknown'} days left · validationAuthorized=${h.tls.validationAuthorized} · identityAuthorized=${h.tls.identityAuthorized ?? 'unknown'} · identityError=${h.tls.identityError ?? 'none'}`,
+          `**TLS:** ${literalText(h.tls.protocol ?? 'unknown')} / ${literalText(h.tls.cipher ?? 'unknown')} · issuer ${literalText(h.tls.issuer ?? 'unknown')} · ${h.tls.daysUntilExpiry ?? 'unknown'} days left · validationAuthorized=${h.tls.validationAuthorized} · identityAuthorized=${h.tls.identityAuthorized ?? 'unknown'} · identityError=${literalText(h.tls.identityError ?? 'none')}`,
         );
-        if (h.tls.findings.length > 0) lines.push(`  - ${h.tls.findings.join(' ')}`);
+        for (const finding of h.tls.findings) lines.push(`  - ${literalText(finding)}`);
       }
       if (h.http) {
-        lines.push(`**HTTP:** ${h.http.finalStatus} → ${h.http.finalUrl}`);
+        lines.push(`**HTTP:** ${h.http.finalStatus} → ${literalText(h.http.finalUrl)}`);
         lines.push(
           `**Missing security headers:** ${h.http.missingSecurityHeaders.map(literalText).join(', ') || 'none'}`,
         );
         lines.push(
-          `  - Body inspection: ${h.http.bodyInspection.status} (${h.http.bodyInspection.error ?? 'no error'})`,
+          `  - Body inspection: ${h.http.bodyInspection.status} (${literalText(h.http.bodyInspection.error ?? 'no error')})`,
         );
         if (h.http.technologies.length > 0) {
           lines.push(
-            `  - Tech: ${h.http.technologies.map((t) => `${t.name}${t.version ? ` ${t.version}` : ''} (${t.category})`).join(', ')}`,
+            `  - Tech: ${h.http.technologies.map((t) => `${literalText(t.name)}${t.version === undefined ? '' : ` ${literalText(t.version)}`} (${literalText(t.category)})`).join(', ')}`,
           );
         }
-        if (h.http.securityFindings.length > 0) {
-          lines.push(`  - Security: ${h.http.securityFindings.join(' ')}`);
-        }
+        for (const finding of h.http.securityFindings)
+          lines.push(`  - Security: ${literalText(finding)}`);
       }
       if (h.shodan) {
-        lines.push(
-          `**Shodan ports:** ${h.shodan.ports.join(', ') || 'none'}${h.shodan.lastUpdate ? ` (scanned ${h.shodan.lastUpdate})` : ''}`,
-        );
+        lines.push(`**Shodan ports:** ${renderShodanScan(h.shodan.ports, h.shodan.lastUpdate)}`);
+        for (const observation of h.shodan.observations ?? [])
+          lines.push(
+            `  - ${observation.ip}: ${renderShodanScan(observation.ports, observation.lastUpdate)}`,
+          );
       }
     }
 
@@ -505,6 +520,10 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
   },
 });
 
+function renderShodanScan(ports: number[], lastUpdate?: string): string {
+  return `${ports.join(', ') || 'none'}${lastUpdate === undefined ? '' : ` (scanned ${literalText(lastUpdate)})`}`;
+}
+
 type LiveHost = {
   host: string;
   addresses: string[];
@@ -524,15 +543,13 @@ function buildGuidanceHandoff(
   const eligible: z.infer<typeof FindingHostSchema>[] = hosts.flatMap((h) => {
     const missingSecurityHeaders = h.http?.missingSecurityHeaders ?? [];
     const technologies = h.http?.technologies.filter((t) => t.version !== undefined) ?? [];
+    const openPorts = [...new Set(h.shodan?.observations?.flatMap((scan) => scan.ports))].sort(
+      (a, b) => a - b,
+    );
     // enrichTls retains the leaf issuer string (even empty); null means no certificate was presented.
     const certificateKnown = h.tls !== null && h.tls.issuer !== null;
     const tlsSignal = h.tls !== null && (h.tls.protocol !== null || certificateKnown);
-    if (
-      !tlsSignal &&
-      !missingSecurityHeaders.length &&
-      !technologies.length &&
-      !h.shodan?.ports.length
-    )
+    if (!tlsSignal && !missingSecurityHeaders.length && !technologies.length && !openPorts.length)
       return [];
     return [
       {
@@ -550,7 +567,7 @@ function buildGuidanceHandoff(
         ...(technologies.length
           ? { technologies: technologies.map((t) => ({ name: t.name, version: t.version })) }
           : {}),
-        ...(h.shodan ? { openPorts: h.shodan.ports } : {}),
+        ...(h.shodan ? { openPorts } : {}),
       },
     ];
   });
@@ -665,18 +682,25 @@ async function enrichShodan(hosts: LiveHost[], ctx: Context, notes: string[]): P
   const shodan = getShodanService();
   const distinctIps = [...new Set(hosts.flatMap((h) => h.addresses))];
   const attempts = await discoveryPool(distinctIps, (ip) => shodan.lookupHost(ip, ctx), ctx.signal);
-  const byIp = new Map([...attempts].map(([ip, r]) => [ip, r.value]));
   let enriched = 0;
   for (const h of hosts) {
     h.errors.shodan =
       h.addresses
         .flatMap((ip) => (attempts.get(ip)?.error ? [`${ip}: ${attempts.get(ip)?.error}`] : []))
         .join('; ') || null;
-    const hit = h.addresses
-      .map((ip) => byIp.get(ip))
-      .find((r): r is ShodanHostResult => Boolean(r));
-    if (hit) {
-      h.shodan = { ports: hit.ports, ...(hit.lastUpdate ? { lastUpdate: hit.lastUpdate } : {}) };
+    const observations = h.addresses.flatMap((ip) => {
+      const hit = attempts.get(ip)?.value;
+      return hit
+        ? [{ ip, ports: hit.ports, ...(hit.lastUpdate ? { lastUpdate: hit.lastUpdate } : {}) }]
+        : [];
+    });
+    const first = observations[0];
+    if (first) {
+      h.shodan = {
+        ports: first.ports,
+        ...(first.lastUpdate ? { lastUpdate: first.lastUpdate } : {}),
+        observations,
+      };
       enriched++;
     }
   }

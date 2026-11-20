@@ -12,9 +12,15 @@ import { isValidHost } from '@/utils/validation.js';
 /** Findings accepted by guidance and generated directly from map service evidence. */
 export const FindingHostSchema = z
   .object({
-    host: z.string().describe('Hostname this finding pertains to.'),
+    host: z
+      .string()
+      .regex(/\S/, 'Provide a nonblank host identifier.')
+      .describe('Nonblank host identifier this finding pertains to.'),
     addresses: z.array(z.string()).optional().describe('Resolved IPs, when known.'),
-    tlsProtocol: z.string().optional().describe('Negotiated TLS protocol, when known.'),
+    tlsProtocol: z
+      .string()
+      .optional()
+      .describe('Negotiated TLS protocol. Omitted and blank values mean unknown.'),
     certDaysUntilExpiry: z
       .number()
       .optional()
@@ -88,6 +94,10 @@ const OutputSchema = z.object({
 type Output = z.infer<typeof OutputSchema>;
 type Priority = z.infer<typeof PrioritySchema>;
 
+function observedTlsProtocol(protocol: string | undefined): string | undefined {
+  return protocol?.trim() ? protocol : undefined;
+}
+
 export const reconGuidanceTool = tool('attacksurface_recon_guidance', {
   title: 'attacksurface_recon_guidance',
   description:
@@ -147,6 +157,7 @@ export const reconGuidanceTool = tool('attacksurface_recon_guidance', {
         'Renew the domain registration and enable auto-renew and registrar lock.',
       );
     for (const h of input.findings.hosts) {
+      const tlsProtocol = observedTlsProtocol(h.tlsProtocol);
       if (posture) {
         const days = h.certDaysUntilExpiry;
         if (days !== undefined && days < 30)
@@ -171,10 +182,10 @@ export const reconGuidanceTool = tool('attacksurface_recon_guidance', {
             `${h.host}: TLS certificate does not match the requested hostname.`,
             'Deploy a certificate that covers the requested hostname.',
           );
-        if (h.tlsProtocol && ['TLSv1', 'TLSv1.0', 'TLSv1.1', 'SSLv3'].includes(h.tlsProtocol))
+        if (tlsProtocol && ['TLSv1', 'TLSv1.0', 'TLSv1.1', 'SSLv3'].includes(tlsProtocol))
           add(
             'high',
-            `${h.host}: negotiated deprecated protocol ${h.tlsProtocol}.`,
+            `${h.host}: negotiated deprecated protocol ${tlsProtocol}.`,
             'Disable deprecated protocols; require TLS 1.2 or later.',
           );
         if (h.missingSecurityHeaders?.length)
@@ -195,7 +206,7 @@ export const reconGuidanceTool = tool('attacksurface_recon_guidance', {
               ? `Check ${tech.name} ${tech.version} on ${h.host} against authoritative vendor advisories and CVE records; confirm applicability before remediation.`
               : 'Identify the exact product version before checking advisories.',
           );
-        if (h.tlsProtocol === undefined) {
+        if (tlsProtocol === undefined) {
           add(
             'info',
             `${h.host}: TLS posture is unknown.`,
@@ -242,7 +253,7 @@ export const reconGuidanceTool = tool('attacksurface_recon_guidance', {
         (input.topic === 'triage' && expiry !== undefined) ||
         input.findings.hosts.some(
           (host) =>
-            host.tlsProtocol !== undefined ||
+            observedTlsProtocol(host.tlsProtocol) !== undefined ||
             host.certDaysUntilExpiry !== undefined ||
             host.certValidationAuthorized !== undefined ||
             host.certIdentityAuthorized !== undefined ||

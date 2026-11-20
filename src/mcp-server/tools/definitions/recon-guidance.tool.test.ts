@@ -64,6 +64,19 @@ describe('attacksurface_recon_guidance', () => {
     expect(result.plan).toContain('Defensive review');
   });
 
+  it.each(['intranet', 'bücher.example', 'example.com:8443'])(
+    'keeps offline findings for %s without emitting executable calls',
+    async (host) => {
+      const result = await run({
+        findings: { hosts: [{ host, certDaysUntilExpiry: -3, addresses: ['192.0.2.1'] }] },
+      });
+      expect(result.priorities.map((priority) => priority.finding)).toContain(
+        `${host}: TLS certificate expired 3 day(s) ago.`,
+      );
+      expect(result.nextToolSuggestions).toEqual([]);
+    },
+  );
+
   it('produces format() output that mentions priorities and suggested calls', async () => {
     const input = reconGuidanceTool.input.parse({
       findings: {

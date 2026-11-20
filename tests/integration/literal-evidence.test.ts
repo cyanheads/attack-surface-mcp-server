@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import { inspectTlsTool } from '@/mcp-server/tools/definitions/inspect-tls.tool.js';
 import { lookupHostTool } from '@/mcp-server/tools/definitions/lookup-host.tool.js';
+import { mapDomainTool } from '@/mcp-server/tools/definitions/map-domain.tool.js';
 import { probeHttpTool } from '@/mcp-server/tools/definitions/probe-http.tool.js';
 import { resolveDnsTool } from '@/mcp-server/tools/definitions/resolve-dns.tool.js';
 
@@ -20,6 +21,80 @@ function assertEvidence(blocks: unknown, singles: string[], multiples: string[])
 }
 
 describe('literal evidence formatter wiring', () => {
+  it('renders map posture summaries and assessment as literal upstream evidence', () => {
+    const protocol = evidence('protocol');
+    const cipher = evidence('cipher');
+    const issuer = evidence('issuer');
+    const identityError = evidence('identity');
+    const bodyError = evidence('body error');
+    const name = evidence('technology');
+    const version = evidence('version');
+    const category = evidence('category');
+    const lastUpdate = evidence('scan date');
+    const finalUrl = 'https://example.com/?q=[text](path)&a=1';
+    const tlsFinding = multiline('TLS finding');
+    const httpFinding = multiline('HTTP finding');
+    const assessment = [`example.com: ${tlsFinding}`, `example.com: ${httpFinding}`];
+    const result = mapDomainTool.output.parse({
+      domain: 'example.com',
+      depth: 'thorough',
+      subdomainCount: 0,
+      liveHostCount: 1,
+      liveHosts: [
+        {
+          host: 'example.com',
+          addresses: ['192.0.2.1'],
+          dns: null,
+          errors: { addresses: null, dns: null, tls: null, http: null, shodan: null },
+          tls: {
+            protocol,
+            cipher,
+            issuer,
+            daysUntilExpiry: null,
+            validationAuthorized: true,
+            findings: [tlsFinding],
+            identityAuthorized: false,
+            identityError,
+          },
+          http: {
+            finalStatus: 200,
+            finalUrl,
+            bodyInspection: { status: 'failed', error: bodyError },
+            securityFindings: [httpFinding],
+            missingSecurityHeaders: [],
+            technologies: [{ name, version, category }],
+          },
+          shodan: { ports: [443], lastUpdate },
+        },
+      ],
+      assessment,
+      unresolvedSubdomains: [],
+      registration: null,
+      notes: [],
+      addressStatuses: [],
+      coverage: {
+        discovered: 1,
+        examined: 1,
+        unexamined: [],
+        detailed: 1,
+        detailOmitted: [],
+        retrieval: [],
+      },
+      nextToolSuggestions: [],
+      guidanceCoverage: { eligibleCount: 0, includedCount: 0, omittedHosts: [] },
+      guidanceNotice: 'Fixture',
+    });
+    const before = structuredClone(result);
+    const blocks = mapDomainTool.format?.(result);
+    assertEvidence(
+      blocks,
+      [protocol, cipher, issuer, identityError, bodyError, name, version, category, lastUpdate],
+      [tlsFinding, httpFinding, ...assessment],
+    );
+    expect(blocks?.[0]).toMatchObject({ text: expect.stringContaining(`\`${finalUrl}\``) });
+    expect(result).toEqual(before);
+  });
+
   it('renders HTTP headers, body evidence, cookies, and redirects literally', () => {
     const singles = ['location', 'header', 'hsts', 'cookie', 'sameSite', 'cors', 'finding'].map(
       evidence,

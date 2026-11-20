@@ -536,6 +536,92 @@ describe('attacksurface_map_domain', () => {
     },
   );
 
+  async function mapShodanAddresses(addresses: string[]) {
+    vi.stubEnv('SHODAN_API_KEY', 'test-key');
+    resetServerConfig();
+    initShodanService(getServerConfig());
+    dnsBoundary.resolve.mockImplementation(async (type) => (type === 'A' ? [...addresses] : []));
+    const queried: string[] = [];
+    fetchMock.mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (url.origin === 'https://api.shodan.io') {
+        const ip = url.pathname.split('/').at(-1) ?? '';
+        queried.push(ip);
+        if (ip === '93.184.216.34')
+          return Response.json({ ports: [443], last_update: '2026-01-01T01:00:00Z' });
+        if (ip === '93.184.216.35')
+          return Response.json({ ports: [3389, 443], last_update: '<b>second scan</b>' });
+        if (ip === '93.184.216.37') return Response.json({ ports: [] });
+        return new Response('', { status: 404 });
+      }
+      if (url.origin === 'https://crt.sh' || url.origin === 'https://api.certspotter.com')
+        return Response.json([]);
+      return new Response('', {
+        headers: {
+          'strict-transport-security': 'max-age=31536000',
+          'content-security-policy': "default-src 'self'",
+          'x-frame-options': 'DENY',
+          'x-content-type-options': 'nosniff',
+          'referrer-policy': 'no-referrer',
+          'permissions-policy': 'geolocation=()',
+        },
+      });
+    });
+    const result = await runToolContract(mapDomainTool, {
+      domain: 'example.com',
+      depth: 'thorough',
+      includeRegistration: false,
+    });
+    expect(queried).toEqual(addresses);
+    return {
+      map: mapDomainTool.output.parse(result.structuredContent),
+      text: result.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n'),
+    };
+  }
+
+  it('keeps the first successful Shodan summary and attributes an adjacent failure', async () => {
+    const { map, text } = await mapShodanAddresses([
+      '93.184.216.36',
+      '93.184.216.34',
+      '93.184.216.35',
+    ]);
+    expect(map.liveHosts[0]).toMatchObject({
+      shodan: { ports: [443], lastUpdate: '2026-01-01T01:00:00Z' },
+      errors: { shodan: '93.184.216.36: Shodan has no information for this target.' },
+    });
+    expect(text).toContain('Shodan ports:** 443');
+    expect(text).toContain('93.184.216.36: Shodan has no information for this target.');
+  });
+
+  it.each([
+    ['93.184.216.34', '93.184.216.35', '93.184.216.37'],
+    ['93.184.216.35', '93.184.216.34', '93.184.216.37'],
+    ['93.184.216.37', '93.184.216.34', '93.184.216.35'],
+  ])(
+    'preserves every Shodan observation and uses the port union when %s is the first success',
+    async (...addresses) => {
+      const { map, text } = await mapShodanAddresses(['93.184.216.36', ...addresses]);
+      const observations = map.liveHosts[0]?.shodan?.observations;
+      expect(observations).toHaveLength(3);
+      expect(observations).toEqual(
+        expect.arrayContaining([
+          { ip: '93.184.216.34', ports: [443], lastUpdate: '2026-01-01T01:00:00Z' },
+          { ip: '93.184.216.35', ports: [443, 3389], lastUpdate: '<b>second scan</b>' },
+          { ip: '93.184.216.37', ports: [] },
+        ]),
+      );
+      expect(map.liveHosts[0]?.errors.shodan).toContain('93.184.216.36:');
+      const args = reconGuidanceTool.input.parse(map.nextToolSuggestions[0]?.args);
+      expect(args.findings.hosts[0]?.openPorts).toEqual([443, 3389]);
+      expect(text).toContain('93.184.216.35: 443, 3389 (scanned `<b>second scan</b>`)');
+      expect(text).toContain('93.184.216.37: none');
+      expect(text).toContain('"openPorts":[443,3389]');
+    },
+  );
+
   it('prices quick and standard DNS work and carries sparse records as literal evidence', async () => {
     fetchMock.mockImplementation(async (input) =>
       ['https://crt.sh', 'https://api.certspotter.com'].includes(new URL(String(input)).origin)
@@ -744,7 +830,7 @@ describe('attacksurface_map_domain', () => {
           },
         ],
       });
-      expect(JSON.stringify(result.content)).toContain('Cloudflare (cdn)');
+      expect(JSON.stringify(result.content)).toContain('`Cloudflare` (`cdn`)');
       const resource = await surfaceResource.handler(
         { domain: 'example.com' },
         createMockContext(),

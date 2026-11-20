@@ -3,11 +3,108 @@
  * @module tests/integration/recon-guidance.tool.test
  */
 
-import { createMockContext, type MockContextLogger } from '@cyanheads/mcp-ts-core/testing';
+import { z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import {
+  createMockContext,
+  type MockContextLogger,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
-import { reconGuidanceTool } from '@/mcp-server/tools/definitions/recon-guidance.tool.js';
+import {
+  FindingHostSchema,
+  reconGuidanceTool,
+} from '@/mcp-server/tools/definitions/recon-guidance.tool.js';
 
 describe('attacksurface_recon_guidance contract', () => {
+  it.each(['', ' \t '])('rejects blank host (%j) on both response surfaces', async (host) => {
+    const result = await runToolContract(reconGuidanceTool, {
+      findings: {
+        hosts: [{ host: 'other.example.com' }, { host, missingSecurityHeaders: [] }],
+      },
+    });
+    const path = 'findings.hosts.1.host';
+    const message = 'Provide a nonblank host identifier.';
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams, message: expect.stringContaining(path) },
+    });
+    expect(JSON.stringify(result.structuredContent)).toContain(message);
+    expect(JSON.stringify(result.content)).toContain(path);
+    expect(JSON.stringify(result.content)).toContain(message);
+  });
+
+  it('advertises nonblank hosts and optional TLS strings', () => {
+    const schema = z.toJSONSchema(FindingHostSchema);
+    expect(schema).toMatchObject({
+      properties: { host: { pattern: '\\S' }, tlsProtocol: { type: 'string' } },
+      required: ['host'],
+    });
+    expect(schema.properties?.tlsProtocol).not.toHaveProperty('pattern');
+  });
+
+  it.each(['posture', 'triage'] as const)(
+    'keeps certificate expiry with a blank TLS protocol in %s',
+    async (topic) => {
+      const finding = 'example.test: TLS certificate expired 3 day(s) ago.';
+      const result = await runToolContract(reconGuidanceTool, {
+        topic,
+        findings: { hosts: [{ host: 'example.test', tlsProtocol: '', certDaysUntilExpiry: -3 }] },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        priorities: expect.arrayContaining([
+          { severity: 'high', finding, action: 'Renew now; automate certificate renewal.' },
+        ]),
+      });
+      const text = JSON.stringify(result.content);
+      expect(text).toContain(finding);
+      expect(text.includes('TLS posture is unknown.')).toBe(topic === 'triage');
+    },
+  );
+
+  it.each(['', ' \t '])('treats protocol %j alone as unknown', async (tlsProtocol) => {
+    const finding = 'Assessment coverage is unknown from the supplied findings.';
+    const result = await runToolContract(reconGuidanceTool, {
+      topic: 'posture',
+      findings: { hosts: [{ host: 'example.test', tlsProtocol }] },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ priorities: [{ finding }] });
+    expect(JSON.stringify(result.content)).toContain(finding);
+  });
+
+  it.each(['TLSv1.4', ' TLSv1.1 '])('keeps protocol %j as supplied', async (tlsProtocol) => {
+    const finding = 'No selected findings require action based on the supplied evidence.';
+    const result = await runToolContract(reconGuidanceTool, {
+      topic: 'posture',
+      findings: { hosts: [{ host: 'example.test', tlsProtocol }] },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ priorities: [{ finding }] });
+    expect(JSON.stringify(result.content)).toContain(finding);
+  });
+
+  it.each(['triage', 'coverage'] as const)(
+    'reports an omitted protocol as unknown in %s',
+    async (topic) => {
+      const finding = 'example.com: TLS posture is unknown.';
+      const result = await runToolContract(reconGuidanceTool, {
+        topic,
+        findings: {
+          hosts: [{ host: 'example.com', addresses: ['192.0.2.1'], missingSecurityHeaders: [] }],
+        },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        priorities: [{ finding }],
+        nextToolSuggestions: [
+          { toolName: 'attacksurface_inspect_tls', args: { hosts: ['example.com'], port: 443 } },
+        ],
+      });
+      expect(JSON.stringify(result.content)).toContain(finding);
+    },
+  );
   it('keeps domain text raw in structured output and encodes only the text twin', async () => {
     const result = await reconGuidanceTool.handler(
       reconGuidanceTool.input.parse({ findings: { domain: '<b>*domain*</b>', hosts: [] } }),
