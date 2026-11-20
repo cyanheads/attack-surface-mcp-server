@@ -449,48 +449,49 @@ export const mapDomainTool = tool('attacksurface_map_domain', {
 
     if (result.assessment.length > 0) {
       lines.push('## Assessment (observable findings)');
-      for (const a of result.assessment) lines.push(`- ${a}`);
+      for (const a of result.assessment) lines.push(`- ${literalText(a)}`);
     }
 
     lines.push('## Live hosts');
     for (const h of result.liveHosts) {
-      lines.push(`### ${h.host}`);
+      lines.push(`### ${literalText(h.host)}`);
       lines.push(`**Addresses:** ${h.addresses.join(', ')}`);
       lines.push(`**DNS:** ${h.dns ? renderDnsPosture(h.dns) : 'skipped'}`);
       lines.push(`**Leg errors:** ${literalText(JSON.stringify(h.errors))}`);
       if (h.tls) {
         lines.push(
-          `**TLS:** ${h.tls.protocol ?? 'unknown'} / ${h.tls.cipher ?? 'unknown'} · issuer ${h.tls.issuer ?? 'unknown'} · ${h.tls.daysUntilExpiry ?? 'unknown'} days left · validationAuthorized=${h.tls.validationAuthorized} · identityAuthorized=${h.tls.identityAuthorized ?? 'unknown'} · identityError=${h.tls.identityError ?? 'none'}`,
+          `**TLS:** ${literalText(h.tls.protocol ?? 'unknown')} / ${literalText(h.tls.cipher ?? 'unknown')} · issuer ${literalText(h.tls.issuer ?? 'unknown')} · ${h.tls.daysUntilExpiry ?? 'unknown'} days left · validationAuthorized=${h.tls.validationAuthorized} · identityAuthorized=${h.tls.identityAuthorized ?? 'unknown'} · identityError=${literalText(h.tls.identityError ?? 'none')}`,
         );
-        if (h.tls.findings.length > 0) lines.push(`  - ${h.tls.findings.join(' ')}`);
+        if (h.tls.findings.length > 0)
+          lines.push(`  - ${h.tls.findings.map(literalText).join(' ')}`);
       }
       if (h.http) {
-        lines.push(`**HTTP:** ${h.http.finalStatus} → ${h.http.finalUrl}`);
+        lines.push(`**HTTP:** ${h.http.finalStatus} → ${literalText(h.http.finalUrl)}`);
         lines.push(
           `**Missing security headers:** ${h.http.missingSecurityHeaders.map(literalText).join(', ') || 'none'}`,
         );
         lines.push(
-          `  - Body inspection: ${h.http.bodyInspection.status} (${h.http.bodyInspection.error ?? 'no error'})`,
+          `  - Body inspection: ${h.http.bodyInspection.status} (${literalText(h.http.bodyInspection.error ?? 'no error')})`,
         );
         if (h.http.technologies.length > 0) {
           lines.push(
-            `  - Tech: ${h.http.technologies.map((t) => `${t.name}${t.version ? ` ${t.version}` : ''} (${t.category})`).join(', ')}`,
+            `  - Tech: ${h.http.technologies.map((t) => literalText(`${t.name}${t.version ? ` ${t.version}` : ''} (${t.category})`)).join(', ')}`,
           );
         }
         if (h.http.securityFindings.length > 0) {
-          lines.push(`  - Security: ${h.http.securityFindings.join(' ')}`);
+          lines.push(`  - Security: ${h.http.securityFindings.map(literalText).join(' ')}`);
         }
       }
       if (h.shodan) {
         lines.push(
-          `**Shodan ports:** ${h.shodan.ports.join(', ') || 'none'}${h.shodan.lastUpdate ? ` (scanned ${h.shodan.lastUpdate})` : ''}`,
+          `**Shodan ports:** ${h.shodan.ports.join(', ') || 'none'}${h.shodan.lastUpdate ? ` (scanned ${literalText(h.shodan.lastUpdate)})` : ''}`,
         );
       }
     }
 
     if (result.unresolvedSubdomains.length > 0) {
       lines.push(`## Unresolved subdomains (${result.unresolvedSubdomains.length})`);
-      lines.push(result.unresolvedSubdomains.join(', '));
+      lines.push(result.unresolvedSubdomains.map(literalText).join(', '));
     }
 
     if (result.notes.length > 0) {

@@ -273,6 +273,70 @@ describe('attacksurface_map_domain', () => {
     },
   );
 
+  it('renders upstream TLS, HTTP and discovery evidence literally while retaining its original values', async () => {
+    const issuer = '<b>Example CA</b>\n```\nsecond line';
+    const fence = '````';
+    const cookie = '*sample*';
+    const finding = `Cookie "${cookie}" is missing the Secure flag.`;
+    const technology = '<b>Example Framework</b>';
+    const unresolved = '*label*.example.com';
+    class IssuerSocket extends CertificateSocket {
+      override getPeerCertificate() {
+        return { ...super.getPeerCertificate(), issuer: { CN: issuer } };
+      }
+    }
+    tlsBoundary.connect.mockImplementation(
+      (_options, callback) => new IssuerSocket('Jan 01 00:00:00 2027 GMT', callback),
+    );
+    dnsBoundary.resolve.mockImplementation(async (type, host) =>
+      type === 'A' && host === 'example.com' ? ['93.184.216.34'] : [],
+    );
+    fetchMock.mockImplementation(async (input) => {
+      const origin = new URL(String(input)).origin;
+      if (origin === 'https://crt.sh') return Response.json([{ name_value: unresolved }]);
+      if (origin === 'https://api.certspotter.com') return Response.json([]);
+      return new Response('', {
+        headers: {
+          'set-cookie': `${cookie}=value; HttpOnly; SameSite=Lax`,
+          'x-powered-by': technology,
+        },
+      });
+    });
+    const result = await runToolContract(mapDomainTool, {
+      domain: 'example.com',
+      includeRegistration: false,
+    });
+    expect(result.structuredContent).toMatchObject({
+      liveHosts: [
+        {
+          tls: { issuer },
+          http: {
+            securityFindings: expect.arrayContaining([finding]),
+            technologies: [{ name: technology, category: 'framework' }],
+          },
+        },
+      ],
+      assessment: expect.arrayContaining([`example.com: ${finding}`]),
+      unresolvedSubdomains: [unresolved],
+    });
+    expect(result.content[0]).toMatchObject({
+      text: expect.stringContaining(`issuer \n\n${fence}\n${issuer}\n${fence}\n\n`),
+    });
+    expect(result.content[0]).toMatchObject({
+      text: expect.stringContaining(`- \`example.com: ${finding}\``),
+    });
+    const text = result.content.find((block) => block.type === 'text')?.text;
+    expect(text?.split('\n').find((line) => line.startsWith('  - Security: '))).toContain(
+      `\`${finding}\``,
+    );
+    expect(result.content[0]).toMatchObject({
+      text: expect.stringContaining(`  - Tech: \`${technology} (framework)\``),
+    });
+    expect(result.content[0]).toMatchObject({
+      text: expect.stringContaining(`## Unresolved subdomains (1)\n\`${unresolved}\``),
+    });
+  });
+
   it('projects and renders the apex registrar contact and literal registration values', async () => {
     dnsBoundary.resolve.mockImplementation(async (type) => (type === 'A' ? ['93.184.216.34'] : []));
     fetchMock.mockImplementation(async (input) => {
