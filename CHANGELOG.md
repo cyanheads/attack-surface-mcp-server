@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.1](changelog/0.6.x/0.6.1.md) — 2026-11-20
+
+Preserve passive assessment evidence and cancellation
+
 ## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-11-11 · ⚠️ Breaking · 🛡️ Security
 
 Guarded connections validate hostnames through configured DNS, and assessment tools return complete evidence within their item limits.
