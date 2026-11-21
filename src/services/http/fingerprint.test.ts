@@ -71,6 +71,16 @@ describe('fingerprint', () => {
     expect(wp?.evidence).toContain('body marker');
   });
 
+  it.each([
+    ['WordPress', '<meta name="generator" content="WordPress.com" />'],
+    ['Drupal', '<meta name="generator" content="Drupal.org" />'],
+  ])('omits version when %s generator marker carries a bare dot', (name, body) => {
+    const hits = fingerprint({}, body);
+    const hit = hits.find((h) => h.name === name);
+    expect(hit).toBeDefined();
+    expect(hit?.version).toBeUndefined();
+  });
+
   it('detects Angular from a body marker with its version', () => {
     expect(fingerprint({}, '<app-root ng-version="21.0.1">')).toEqual([
       {
