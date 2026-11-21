@@ -74,13 +74,13 @@ const HEADER_RULES: HeaderRule[] = [
 
 const BODY_RULES: BodyRule[] = [
   {
-    marker: /<meta[^>]+name=["']generator["'][^>]+content=["']WordPress\s*([\d.]+)?/i,
+    marker: /<meta[^>]+name=["']generator["'][^>]+content=["']WordPress(?:\s+(\d+(?:\.\d+)*))?/i,
     name: 'WordPress',
     category: 'cms',
   },
   { marker: /\/wp-(?:content|includes)\//i, name: 'WordPress', category: 'cms' },
   {
-    marker: /<meta[^>]+name=["']generator["'][^>]+content=["']Drupal\s*([\d.]+)?/i,
+    marker: /<meta[^>]+name=["']generator["'][^>]+content=["']Drupal(?:\s+(\d+(?:\.\d+)*))?/i,
     name: 'Drupal',
     category: 'cms',
   },
