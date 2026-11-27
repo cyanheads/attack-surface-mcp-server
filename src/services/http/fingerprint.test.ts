@@ -82,6 +82,17 @@ describe('fingerprint', () => {
     ]);
   });
 
+  it.each(['WordPress', 'Drupal'])('preserves adjacent numeric %s versions', (name) => {
+    expect(fingerprint({}, `<meta name="generator" content="${name}10.2">`)).toEqual([
+      {
+        name,
+        category: 'cms',
+        version: '10.2',
+        evidence: `body marker: <meta name="generator" content="${name}10.2`,
+      },
+    ]);
+  });
+
   it.each([
     ['WordPress', '6.8.3'],
     ['Drupal', '10.5.2'],

@@ -8,6 +8,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { probeHttpTool } from '@/mcp-server/tools/definitions/probe-http.tool.js';
+import { reconGuidanceTool } from '@/mcp-server/tools/definitions/recon-guidance.tool.js';
 import { initHttpService } from '@/services/http/http-service.js';
 
 type HandlerCtx = Parameters<typeof probeHttpTool.handler>[1];
@@ -99,6 +100,36 @@ describe('attacksurface_probe_http', () => {
     expect(text.text).toContain('`Drupal`');
     expect(text.text).toContain('body marker: <meta name="generator" content="WordPress 6.8.3');
     expect(text.text).not.toContain('8.0');
+  });
+
+  it.each([
+    ['WordPress.com', 'WordPress'],
+    ['Drupal...', 'Drupal'],
+    ['Drupal 10..5', 'Drupal'],
+  ])('omits malformed versions in %s from HTTP evidence and guidance', async (generator, name) => {
+    fetchMock.mockResolvedValue(new Response(`<meta name="generator" content="${generator}">`));
+    const probe = await runToolContract(probeHttpTool, { url: 'https://example.test' });
+    const { technologies } = probeHttpTool.output.parse(probe.structuredContent);
+    expect(technologies).toEqual([
+      { name, category: 'cms', evidence: `body marker: <meta name="generator" content="${name}` },
+    ]);
+    const text = probe.content[0];
+    expect(text).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining(`\`${name}\`  _(cms)_`),
+    });
+    const guidance = await runToolContract(reconGuidanceTool, {
+      topic: 'coverage',
+      findings: { hosts: [{ host: 'example.test', technologies }] },
+    });
+    const finding = `example.test: ${name} detected without a version.`;
+    expect(guidance.structuredContent).toMatchObject({
+      priorities: expect.arrayContaining([expect.objectContaining({ finding })]),
+    });
+    expect(guidance.content[0]).toMatchObject({
+      type: 'text',
+      text: expect.stringContaining(finding),
+    });
   });
 
   it('enforces URL and timeout schema boundaries', () => {
