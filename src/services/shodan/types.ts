@@ -5,8 +5,10 @@
 
 /** One service/banner observed by Shodan on a host. */
 export interface ShodanService {
-  /** Banner excerpt (truncated), when reported. */
+  /** Banner text, when reported. */
   banner?: string;
+  /** Present only when the local excerpt omitted part of the banner. */
+  bannerTruncated?: true;
   /** ISO 8601 timestamp of Shodan's last observation of this service. */
   observedAt?: string;
   /** Open port. */

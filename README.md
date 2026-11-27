@@ -68,7 +68,7 @@ All resource data is also reachable via tools — tool-only clients lose nothing
 
 - Discovers names through crt.sh → Certspotter → the apex TLS certificate SANs, then resolves DNS liveness. `includeUnresolved: false` keeps only live hosts; `filteredAddressErrors` retains DNS failures for excluded names.
 - Returns each name's source provenance and per-source status. `complete`, `pagesFetched`, and `incompleteReason` disclose partial coverage, and `addressError` separates DNS failures from ENODATA/ENOTFOUND absence. A rate-limited source preserves its retry window when supplied; retries share the source deadline.
-- `offset` and `limit` (default 50, larger requests clamped) page through candidates, bounded by `min(50, ATTACKSURFACE_MAX_SUBDOMAINS)`. Use `nextOffset` or the prefilled `continuation` for the next page, and `remainingCount` to see what is left. CT logs are re-read per page, so changes can shift offsets.
+- `limit` defaults to 50 and clamps to `min(50, ATTACKSURFACE_MAX_SUBDOMAINS)`. Follow `continuation` through the current candidates, even when filtering returns an empty page. Once those candidates are exhausted, `sourceContinuation`, when present, resumes Certspotter after the last consumed issuance. Counts apply to the current window. Names may appear in more than one window.
 
 ---
 
@@ -111,6 +111,7 @@ All resource data is also reachable via tools — tool-only clients lose nothing
 - `mode: "host"` (default) looks up one bare IPv4/IPv6 address and returns `invalid_target` for anything else; `mode: "search"` takes an internet-wide query with optional `facets` and may consume Shodan query credits. Requires `SHODAN_API_KEY`.
 - Search returns one 100-match page per call (`page` defaults to 1, ignored in host mode), with `hasMore`, `nextPage`, and a prefilled `continuation`. Later pages are opt-in and may consume credits.
 - Returns ports, banners, software versions, hostnames, ASN, and geography from Shodan's last scan. Missing credentials produce `source_unavailable`; no host data produces `no_data`. The server performs no port scans.
+- Host mode marks clipped excerpts with `bannerTruncated`. Follow `host.fullBannerCall` or set `bannerDetail: "full"` to fetch complete banners for that IP. Compare the observation timestamps across calls because Shodan may have refreshed the record.
 
 ---
 
@@ -119,6 +120,22 @@ All resource data is also reachable via tools — tool-only clients lose nothing
 - Takes prior findings (hosts, certificates, missing headers, software versions, ports). Host identifiers must be nonblank; omitted or blank TLS protocols mean unknown. Topic `triage` covers all findings ordered by urgency, `posture` covers TLS/header hardening, and `coverage` covers inspection and version gaps. Certificate chain trust and hostname identity remain separate findings, including in the map handoff. Open ports are inventory evidence, never proof of a vulnerability.
 - Returns `priorities` plus suggestions as `{toolName, reason, args}` that target local tools only; no external calls or active scans are emitted.
 - `priorityOffset` and `suggestionOffset` page independently with `limit` (default 50, max 50). Resubmit the original findings and topic with the next offsets.
+
+To review a DNS zone you administer, supply its exported CNAME records and saved address statuses in `findings.dnsReview`. For example, the following command builds the tool arguments from two local files: a Route 53 record-set export and the structured output of a domain map. Set `zone` to the name of the exported zone.
+
+```sh
+jq --arg zone example.com --slurpfile maps saved-map.json '{
+  findings: {hosts: [], dnsReview: {
+    zone: $zone,
+    cnameRecords: [.ResourceRecordSets[] | select(.Type == "CNAME")
+      | select((.Name | startswith("*.") or startswith("\\052.")) | not)
+      | .Name as $owner | .ResourceRecords[] | {owner: $owner, target: .Value}],
+    addressStatuses: $maps[0].addressStatuses
+  }}
+}' zone-export.json
+```
+
+The example selects literal CNAME owners and skips wildcard records. The review reports an in-zone alias when the saved observations for its owner contain no addresses and no lookup error. Conflicting records or observations suppress the finding. Confirm the record's intended use before changing DNS.
 
 ---
 

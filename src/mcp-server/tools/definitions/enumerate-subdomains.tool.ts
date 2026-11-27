@@ -7,10 +7,11 @@
  * @module mcp-server/tools/definitions/enumerate-subdomains.tool
  */
 
+import { createHash } from 'node:crypto';
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
-import { getCtService } from '@/services/ct/ct-service.js';
+import { CERTSPOTTER_PAGE_CAP, getCtService } from '@/services/ct/ct-service.js';
 import type { CtSource } from '@/services/ct/types.js';
 import { getDnsService } from '@/services/dns/dns-service.js';
 import { getTlsService } from '@/services/tls/tls-service.js';
@@ -86,6 +87,26 @@ export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains'
       .describe(
         'Requested candidate count; effective limit is min(request, 50, ATTACKSURFACE_MAX_SUBDOMAINS).',
       ),
+    certspotterAfter: z
+      .string()
+      .min(1)
+      .optional()
+      .describe('Opaque Certspotter issuance ID from a continuation. Resumes Certspotter only.'),
+    candidateWindow: z
+      .object({
+        pages: z
+          .number()
+          .int()
+          .min(1)
+          .max(CERTSPOTTER_PAGE_CAP)
+          .describe('Certspotter pages in this candidate window.'),
+        digest: z
+          .string()
+          .regex(/^[a-f0-9]{64}$/)
+          .describe('Candidate window fingerprint.'),
+      })
+      .optional()
+      .describe('Replay marker supplied by the candidate continuation.'),
   }),
   output: z.object({
     offset: z.number().describe('Requested candidate offset.'),
@@ -104,6 +125,9 @@ export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains'
     truncated: z.boolean().describe('More candidates remain for another page.'),
     continuation: NextCallSchema.nullable().describe(
       'Next enumeration call preserving sources and filter.',
+    ),
+    sourceContinuation: NextCallSchema.nullable().describe(
+      'Call to resume Certspotter after the local candidates are exhausted, or null.',
     ),
     domain: z.string().describe('Apex domain queried (normalized).'),
     subdomains: z
@@ -126,6 +150,20 @@ export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains'
       ),
   }),
   errors: [
+    {
+      reason: 'invalid_continuation',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Certspotter continuation fields are used without selecting Certspotter.',
+      recovery: 'Use the continuation arguments as returned with the original source selection.',
+    },
+    {
+      reason: 'candidate_window_changed',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The candidate continuation could not reproduce its provider window.',
+      retryable: true,
+      recovery:
+        'Retry the same continuation. If the source data changed permanently, restart the window at offset 0 without candidateWindow.',
+    },
     {
       reason: 'invalid_domain',
       code: JsonRpcErrorCode.ValidationError,
@@ -154,11 +192,21 @@ export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains'
       input.sources && input.sources.length > 0
         ? input.sources
         : ['crt.sh', 'certspotter', 'tls-san'];
+    const { certspotterAfter, candidateWindow } = input;
+    if (
+      (certspotterAfter !== undefined || candidateWindow !== undefined) &&
+      !sources.includes('certspotter')
+    ) {
+      throw ctx.fail('invalid_continuation', undefined, {
+        ...ctx.recoveryFor('invalid_continuation'),
+      });
+    }
+    const queriedSources: CtSource[] = certspotterAfter === undefined ? sources : ['certspotter'];
 
     // The TLS-SAN source needs the apex's certificate SANs — fetch opportunistically when requested.
     let sanNames: string[] = [];
     let sanError: string | null = null;
-    if (sources.includes('tls-san')) {
+    if (queriedSources.includes('tls-san')) {
       try {
         sanNames = await getTlsService().getSans(domain, undefined, undefined, ctx.signal);
       } catch (err) {
@@ -167,8 +215,14 @@ export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains'
       }
     }
 
-    const ct = await getCtService().enumerate(domain, sources, ctx, sanNames);
-    if (sources.includes('tls-san') && !ct.sourceStatuses.some((s) => s.source === 'tls-san'))
+    const ct = await getCtService().enumerate(domain, queriedSources, ctx, sanNames, {
+      after: certspotterAfter,
+      pages: candidateWindow?.pages,
+    });
+    if (
+      queriedSources.includes('tls-san') &&
+      !ct.sourceStatuses.some((s) => s.source === 'tls-san')
+    )
       ct.sourceStatuses.push({
         source: 'tls-san',
         ok: sanError === null,
@@ -196,10 +250,41 @@ export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains'
       );
     }
 
-    const sorted = [...ct.names].sort((a, b) => a.name.localeCompare(b.name));
-    const discoveredCount = sorted.length;
+    const discoveredCount = ct.names.length;
     const limit = Math.min(input.limit, 50, getServerConfig().maxSubdomains);
-    const selected = sorted.slice(input.offset, input.offset + limit);
+    const selected = ct.names.slice(input.offset, input.offset + limit);
+    const end = input.offset + selected.length;
+    const nextOffset = end < discoveredCount ? end : null;
+    const certspotter = ct.sourceStatuses.find((status) => status.source === 'certspotter');
+    const pageCount = certspotter?.pagesFetched;
+    let replay: typeof candidateWindow;
+    if (pageCount && (candidateWindow || nextOffset !== null)) {
+      replay = {
+        pages: pageCount,
+        digest: createHash('sha256')
+          .update(
+            JSON.stringify([
+              domain,
+              sources,
+              input.includeUnresolved,
+              certspotterAfter,
+              pageCount,
+              certspotter?.complete,
+              ct.certspotterNextAfter,
+              ct.names,
+            ]),
+          )
+          .digest('hex'),
+      };
+    }
+    if (candidateWindow && replay?.digest !== candidateWindow.digest) {
+      const recovery = ctx.recoveryFor('candidate_window_changed');
+      throw ctx.fail(
+        'candidate_window_changed',
+        certspotter?.sourceError ?? 'The candidate list changed since the previous page.',
+        { ...recovery },
+      );
+    }
     const liveness = await discoveryPool(
       selected.map((n) => n.name),
       (name) => getDnsService().resolveAddressStatus(name, undefined, ctx.signal),
@@ -219,8 +304,12 @@ export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains'
     });
 
     const subdomains = input.includeUnresolved ? records : records.filter((s) => s.resolved);
-    const end = input.offset + selected.length;
-    const nextOffset = end < discoveredCount ? end : null;
+    const continuationArgs = {
+      domain,
+      sources,
+      includeUnresolved: input.includeUnresolved,
+      limit,
+    };
     return {
       domain,
       subdomains,
@@ -237,21 +326,28 @@ export const enumerateSubdomainsTool = tool('attacksurface_enumerate_subdomains'
       examinedCount: selected.length,
       returnedCount: subdomains.length,
       remainingCount: Math.max(0, discoveredCount - end),
-      pageInstructions: `${discoveredCount === 0 ? `No subdomains found in CT logs for ${domain}. ` : ''}The offset advances by the number of candidates examined, including filtered candidates. Continuation re-reads current CT data, so changes can shift offsets.`,
+      pageInstructions: `${discoveredCount === 0 ? `No subdomains found in CT logs for ${domain}. ` : ''}The offset advances by the number of candidates examined, including filtered candidates. Candidate continuation re-reads the current window. Source continuation starts the next Certspotter window at offset zero.`,
       truncated: nextOffset !== null,
       continuation:
         nextOffset === null
           ? null
           : {
               toolName: 'attacksurface_enumerate_subdomains',
-              reason: 'Read the next candidate page. Current CT changes can shift offsets.',
+              reason: 'Read the next candidate page in the current window.',
               args: {
-                domain,
-                sources,
-                includeUnresolved: input.includeUnresolved,
+                ...continuationArgs,
                 offset: nextOffset,
-                limit,
+                ...(certspotterAfter === undefined ? {} : { certspotterAfter }),
+                ...(replay === undefined ? {} : { candidateWindow: replay }),
               },
+            },
+      sourceContinuation:
+        nextOffset !== null || ct.certspotterNextAfter === undefined
+          ? null
+          : {
+              toolName: 'attacksurface_enumerate_subdomains',
+              reason: 'Resume Certspotter after the completed candidate window.',
+              args: { ...continuationArgs, offset: 0, certspotterAfter: ct.certspotterNextAfter },
             },
     };
   },
@@ -274,6 +370,7 @@ function formatEnumeration(result: {
   pageInstructions: string;
   truncated: boolean;
   continuation: z.infer<typeof NextCallSchema> | null;
+  sourceContinuation: z.infer<typeof NextCallSchema> | null;
 }): Array<{ type: 'text'; text: string }> {
   const lines: string[] = [];
   lines.push(`## Subdomains for ${result.domain}`);
@@ -304,6 +401,7 @@ function formatEnumeration(result: {
   lines.push(
     `truncated=${result.truncated}; ${result.pageInstructions}`,
     `continuation=${literalText(JSON.stringify(result.continuation))}`,
+    `sourceContinuation=${literalText(JSON.stringify(result.sourceContinuation))}`,
   );
   return [{ type: 'text', text: lines.join('\n') }];
 }

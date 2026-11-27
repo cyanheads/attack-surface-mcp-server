@@ -36,10 +36,18 @@ export interface DiscoveredName {
 
 /** Aggregate CT enumeration result. */
 export interface CtEnumerationResult {
+  /** Last safe Certspotter issuance ID when another source request can make progress. */
+  certspotterNextAfter?: string;
   /** The apex domain queried. */
   domain: string;
   /** Discovered subdomain names with provenance. */
   names: DiscoveredName[];
   /** Per-source status (which answered, which failed, counts). */
   sourceStatuses: CtSourceStatus[];
+}
+
+/** Bounds for reading or replaying a window of Certspotter issuance pages. */
+export interface CertspotterWindow {
+  after?: string | undefined;
+  pages?: number | undefined;
 }

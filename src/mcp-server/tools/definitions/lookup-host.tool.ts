@@ -20,7 +20,11 @@ const ServiceBannerSchema = z
     transport: z.string().optional().describe('Transport (tcp/udp), when reported.'),
     product: z.string().optional().describe('Detected product/software, when reported.'),
     version: z.string().optional().describe('Software version, when reported.'),
-    banner: z.string().optional().describe('Banner excerpt (truncated), when reported.'),
+    banner: z.string().optional().describe('Banner text, when reported. Excerpt by default.'),
+    bannerTruncated: z
+      .literal(true)
+      .optional()
+      .describe('Present only if the excerpt omitted banner text.'),
     observedAt: z.string().optional().describe("ISO 8601 timestamp of Shodan's last observation."),
   })
   .describe('A service/banner observed by Shodan on the host.');
@@ -30,6 +34,9 @@ const HostResultSchema = z.object({
   hostnames: z.array(z.string()).describe('Hostnames Shodan associates with the IP.'),
   ports: z.array(z.number()).describe('Open ports observed.'),
   services: z.array(ServiceBannerSchema).describe('Per-service banners.'),
+  fullBannerCall: NextCallSchema.optional().describe(
+    'Opt-in follow-up to refetch complete banners for this IP. Present only when an excerpt was clipped.',
+  ),
   asn: z.string().optional().describe('Autonomous system number, when reported.'),
   org: z.string().optional().describe('ISP/organization, when reported.'),
   country: z.string().optional().describe('Two-letter country code, when reported.'),
@@ -97,6 +104,12 @@ export const lookupHostTool = tool('attacksurface_lookup_host', {
       .default(1)
       .describe(
         'Search page (100 matches per page); ignored in host mode. Each call fetches one page and may consume credits.',
+      ),
+    bannerDetail: z
+      .literal('full')
+      .optional()
+      .describe(
+        'Return complete provider banner text in host mode. Omit for excerpts. Ignored in search mode.',
       ),
   }),
   output: z.object({
@@ -172,8 +185,18 @@ export const lookupHostTool = tool('attacksurface_lookup_host', {
     }
 
     try {
-      const host = await shodan.lookupHost(input.target, ctx);
-      return { mode: 'host' as const, host };
+      const host = await shodan.lookupHost(input.target, ctx, input.bannerDetail);
+      const fullBannerCall = host.services.some((service) => service.bannerTruncated)
+        ? {
+            toolName: 'attacksurface_lookup_host',
+            reason: 'Refetch this host with the complete Shodan banners. Observations may change.',
+            args: { target: input.target, mode: 'host', bannerDetail: 'full' },
+          }
+        : undefined;
+      return {
+        mode: 'host' as const,
+        host: { ...host, ...(fullBannerCall ? { fullBannerCall } : {}) },
+      };
     } catch (err) {
       if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
         throw ctx.fail('no_data', `Shodan has no data for ${input.target}.`, {
@@ -198,9 +221,14 @@ export const lookupHostTool = tool('attacksurface_lookup_host', {
       lines.push(`**Open ports:** ${h.ports.join(', ') || 'none reported'}`);
       lines.push('**Services:**');
       for (const s of h.services) {
+        // JSON string literals preserve whitespace and line endings through Markdown parsing.
+        const banner = s.banner === undefined ? 'no banner' : literalText(JSON.stringify(s.banner));
         lines.push(
-          `- port ${s.port} · ${literalText(s.transport ?? 'tcp')} · ${literalText(s.product ?? 'unknown')} ${s.version === undefined ? '' : literalText(s.version)} · seen ${literalText(s.observedAt ?? 'unknown')} · ${literalText(s.banner ?? 'no banner')}`,
+          `- port ${s.port} · ${literalText(s.transport ?? 'tcp')} · ${literalText(s.product ?? 'unknown')} ${s.version === undefined ? '' : literalText(s.version)} · seen ${literalText(s.observedAt ?? 'unknown')} · ${banner}${s.bannerTruncated ? ' · bannerTruncated=true' : ''}`,
         );
+      }
+      if (h.fullBannerCall) {
+        lines.push(`**fullBannerCall:** ${literalText(JSON.stringify(h.fullBannerCall))}`);
       }
     }
 

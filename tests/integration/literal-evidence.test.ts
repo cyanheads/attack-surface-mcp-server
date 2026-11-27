@@ -269,11 +269,14 @@ describe('literal evidence formatter wiring', () => {
     ]) {
       const before = structuredClone(result);
       const blocks = lookupHostTool.format?.(result);
-      assertEvidence(
-        blocks,
-        result.host ? singles.slice(0, 3) : singles.slice(3),
-        result.host ? [banner] : [],
-      );
+      assertEvidence(blocks, result.host ? singles.slice(0, 3) : singles.slice(3), []);
+      if (result.host)
+        expect(blocks?.[0]).toMatchObject({
+          type: 'text',
+          text: expect.stringContaining(
+            `${'`'.repeat(6)}${JSON.stringify(banner)}${'`'.repeat(6)}`,
+          ),
+        });
       expect(result).toEqual(before);
     }
   });

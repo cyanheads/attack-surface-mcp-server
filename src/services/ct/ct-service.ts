@@ -13,11 +13,17 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import { McpError, rateLimited } from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
-import type { CtEnumerationResult, CtSource, CtSourceStatus, DiscoveredName } from './types.js';
+import type {
+  CertspotterWindow,
+  CtEnumerationResult,
+  CtSource,
+  CtSourceStatus,
+  DiscoveredName,
+} from './types.js';
 
 const CRTSH_TIMEOUT_MS = 20_000;
 const CERTSPOTTER_TIMEOUT_MS = 15_000;
-const CERTSPOTTER_PAGE_CAP = 5;
+export const CERTSPOTTER_PAGE_CAP = 5;
 
 /** A CT log record as returned by crt.sh and Certspotter (only the field we read). */
 interface CtRecord {
@@ -73,10 +79,12 @@ export class CtService {
     sources: CtSource[],
     ctx: Context,
     extraSanNames: string[] = [],
+    certspotterWindow?: CertspotterWindow,
   ): Promise<CtEnumerationResult> {
     const apex = normalizeName(domain);
     const byName = new Map<string, Set<CtSource>>();
     const sourceStatuses: CtSourceStatus[] = [];
+    let certspotterNextAfter: string | undefined;
 
     const record = (names: string[], source: CtSource): number => {
       let added = 0;
@@ -114,7 +122,8 @@ export class CtService {
     // Certspotter
     if (sources.includes('certspotter')) {
       try {
-        const result = await this.fetchCertspotter(apex, ctx);
+        const result = await this.fetchCertspotter(apex, ctx, certspotterWindow);
+        certspotterNextAfter = result.nextAfter;
         const count = record(result.names, 'certspotter');
         sourceStatuses.push({
           source: 'certspotter',
@@ -147,7 +156,12 @@ export class CtService {
       .map(([name, set]) => ({ name, sources: [...set].sort() }))
       .sort((a, b) => a.name.localeCompare(b.name));
 
-    return { domain: apex, names, sourceStatuses };
+    return {
+      domain: apex,
+      names,
+      sourceStatuses,
+      ...(certspotterNextAfter === undefined ? {} : { certspotterNextAfter }),
+    };
   }
 
   /** Query crt.sh and split its newline-delimited `name_value` field. */
@@ -186,12 +200,14 @@ export class CtService {
   private async fetchCertspotter(
     domain: string,
     ctx: Context,
+    { after: startAfter, pages = CERTSPOTTER_PAGE_CAP }: CertspotterWindow = {},
   ): Promise<{
     names: string[];
     complete: boolean;
     pagesFetched: number;
     incompleteReason: string | null;
     sourceError: string | null;
+    nextAfter?: string;
     retryAfterMs?: number;
   }> {
     const url =
@@ -209,10 +225,11 @@ export class CtService {
     const signal = ctx.signal ? AbortSignal.any([ctx.signal, deadline]) : deadline;
     const names: string[] = [];
     let pagesFetched = 0;
-    let after: string | undefined;
+    let after = startAfter;
     const cursors = new Set<string>();
+    if (startAfter !== undefined) cursors.add(startAfter);
     try {
-      while (pagesFetched < CERTSPOTTER_PAGE_CAP) {
+      while (pagesFetched < pages) {
         signal.throwIfAborted();
         const remainingMs = deadlineAt - Date.now();
         if (remainingMs <= 0)
@@ -294,6 +311,7 @@ export class CtService {
         pagesFetched,
         incompleteReason: 'page_cap',
         sourceError: null,
+        ...(after === undefined ? {} : { nextAfter: after }),
       };
     } catch (err) {
       ctx.signal?.throwIfAborted();
@@ -325,6 +343,7 @@ export class CtService {
           retryAfterMs === undefined
             ? sourceError
             : `${sourceError} Retry after ${retryAfterMs} ms.`,
+        ...(after === undefined || after === startAfter ? {} : { nextAfter: after }),
         ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
       };
     }

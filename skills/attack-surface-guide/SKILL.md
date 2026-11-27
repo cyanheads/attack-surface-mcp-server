@@ -4,7 +4,7 @@ description: Use attacksurface_* tools for authorized external attack-surface as
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.1"
+  version: "1.2"
 ---
 
 ## Scope
@@ -51,12 +51,14 @@ Before turning detections into remediation, identify the exact product version a
 
 ### Broader discovery
 
-Use `attacksurface_enumerate_subdomains` when discovery needs its own continuation. Follow its continuation even when a live-only page returns no names. Preserve sources and filtering; deduplicate names across pages because each call re-reads CT data and offsets can shift. Retain name provenance and filtered address failures alongside returned live hosts.
+For a certificate inventory, follow `continuation` through the current candidates, including empty live-only pages. Then use `sourceContinuation`, when present, for the next Certspotter window. Keep provenance while deduplicating names across windows. A failed source or a missing issuance cursor can leave coverage incomplete even when both continuations are empty.
 
 The snapshot resource has separate candidate and host-detail omissions. Use its coverage follow-ups to fill gaps; use the map tool when a guidance handoff is needed.
 
 ### Focused defensive review
 
+When an administrator supplies a local zone export, use `findings.dnsReview` to compare its alias owners with saved address statuses. Keep failed lookups intact. An alias flagged for review records agreement between those two inputs. Check the current configuration and the service owner's intent before changing the record.
+
 Use guidance's posture topic for TLS/header hardening and coverage topic for missing inspection or version evidence; triage combines these review concerns. Supply findings from actual calls, retaining unknown fields as unknown. Guidance is offline synthesis, so its suggested calls still need execution before their results can support a conclusion.
 
-Review observed SSH/RDP ports as inventory, intended exposure and access-control questions. Do not send every observed port to TLS inspection; inspect a known TLS service. Carry Shodan timestamps into the review and choose search continuation deliberately because each page may consume query credits.
+Review observed SSH/RDP ports as inventory, intended exposure and access-control questions. Inspect a known TLS service when certificate evidence is needed. If a clipped Shodan banner omits evidence needed to identify a service, follow the host's full-banner call and compare observation timestamps. Each lookup reads the current provider record. Each additional search page may consume query credits.

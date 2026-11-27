@@ -7,7 +7,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { literalText } from '@/utils/literal-text.js';
 import { NextCallSchema } from '@/utils/next-call.js';
-import { isValidHost } from '@/utils/validation.js';
+import { isValidDomain, isValidHost } from '@/utils/validation.js';
 
 /** Findings accepted by guidance and generated directly from map service evidence. */
 export const FindingHostSchema = z
@@ -65,6 +65,44 @@ const PrioritySchema = z
   })
   .describe('A prioritized finding.');
 
+const DnsNameSchema = z
+  .string()
+  .refine(
+    (value) => value === value.trim() && isValidDomain(value),
+    'Provide a bare DNS name with an optional final dot.',
+  );
+const DnsReviewSchema = z
+  .object({
+    zone: DnsNameSchema.describe('DNS zone covered by the operator-provided export.'),
+    cnameRecords: z
+      .array(
+        z
+          .object({
+            owner: DnsNameSchema.describe('Absolute CNAME owner from the zone export.'),
+            target: DnsNameSchema.describe('Absolute CNAME target from the zone export.'),
+          })
+          .describe('An exported CNAME.'),
+      )
+      .describe('CNAME records supplied by the zone operator.'),
+    addressStatuses: z
+      .array(
+        z
+          .object({
+            host: DnsNameSchema.describe('DNS name examined for A and AAAA.'),
+            addresses: z
+              .array(z.string())
+              .describe('Address answers, empty for confirmed absence.'),
+            addressError: z
+              .string()
+              .nullable()
+              .describe('Lookup failure, or null if both lookups completed.'),
+          })
+          .describe('Historical address evidence for a name.'),
+      )
+      .describe('Previously collected address statuses, separate from host posture findings.'),
+  })
+  .describe('Optional offline DNS record review using only the supplied evidence.');
+
 const OutputSchema = z.object({
   plan: z
     .string()
@@ -98,16 +136,51 @@ function observedTlsProtocol(protocol: string | undefined): string | undefined {
   return protocol?.trim() ? protocol : undefined;
 }
 
+/** Compare historical status and exported records by DNS identity while retaining display spelling. */
+function appendDnsReviewPriorities(
+  review: z.infer<typeof DnsReviewSchema>,
+  priorities: Priority[],
+): void {
+  const dnsKey = (name: string) => name.toLowerCase().replace(/\.$/, '');
+  const zone = dnsKey(review.zone);
+  const absent = new Map<string, boolean>();
+  for (const status of review.addressStatuses) {
+    const host = dnsKey(status.host);
+    absent.set(
+      host,
+      absent.get(host) !== false && status.addressError === null && status.addresses.length === 0,
+    );
+  }
+
+  const records = new Map<string, (typeof review.cnameRecords)[number] | null>();
+  for (const record of review.cnameRecords) {
+    const owner = dnsKey(record.owner);
+    if ((owner !== zone && !owner.endsWith(`.${zone}`)) || !absent.get(owner)) continue;
+    const first = records.get(owner);
+    if (first === undefined) records.set(owner, record);
+    else if (first && dnsKey(first.target) !== dnsKey(record.target)) records.set(owner, null);
+  }
+  for (const record of records.values()) {
+    if (!record) continue;
+    priorities.push({
+      severity: 'low',
+      finding: `${record.owner}: exported CNAME points to ${record.target}; supplied address status shows no A or AAAA answers.`,
+      action: 'Review whether this DNS record should be retained.',
+    });
+  }
+}
+
 export const reconGuidanceTool = tool('attacksurface_recon_guidance', {
   title: 'attacksurface_recon_guidance',
   description:
-    'Synthesize supplied findings into an offline defensive review plan and executable local follow-up calls. triage orders all findings by urgency; posture selects TLS/header hardening; coverage selects inspection/version gaps and observed-service review. Versioned products retain host/product/version advisory-check instructions without external executable calls. Priorities and suggested calls are paged independently, each up to the effective limit. Makes no external calls or active scans. For assets you own or are authorized to assess.',
+    'Synthesize supplied findings into an offline defensive review plan and executable local follow-up calls. triage orders all findings by urgency; posture selects TLS/header hardening; coverage selects inspection/version gaps, observed-service review and optional DNS record review. DNS review uses supplied export records and historical address statuses. Versioned products retain host/product/version advisory-check instructions without external executable calls. Priorities and suggested calls are paged independently, each up to the effective limit. Makes no external calls or active scans. For assets you own or are authorized to assess.',
   annotations: { readOnlyHint: true, openWorldHint: false },
   input: z.object({
     findings: z
       .object({
         domain: z.string().optional().describe('Apex domain under review.'),
         hosts: z.array(FindingHostSchema).describe('Findings gathered from prior calls.'),
+        dnsReview: DnsReviewSchema.optional(),
         registrationExpiryDays: z
           .number()
           .optional()
@@ -118,7 +191,7 @@ export const reconGuidanceTool = tool('attacksurface_recon_guidance', {
       .enum(['triage', 'posture', 'coverage'])
       .default('triage')
       .describe(
-        'triage: all findings; posture: TLS/headers; coverage: inspection/version evidence and observed ports.',
+        'triage: all findings; posture: TLS/headers; coverage: inspection/version evidence, observed ports and DNS record review.',
       ),
     limit: z
       .number()
@@ -247,6 +320,9 @@ export const reconGuidanceTool = tool('attacksurface_recon_guidance', {
             });
         }
       }
+    }
+    if (coverage && input.findings.dnsReview) {
+      appendDnsReviewPriorities(input.findings.dnsReview, priorities);
     }
     if (!priorities.length) {
       const hasEvidence =

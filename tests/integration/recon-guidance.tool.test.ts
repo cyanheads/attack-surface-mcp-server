@@ -203,4 +203,146 @@ describe('attacksurface_recon_guidance contract', () => {
     expect(result.nextToolSuggestions).toEqual([]);
     expect(result.plan).toContain('Topic: coverage');
   });
+
+  it.each(['triage', 'coverage'] as const)(
+    'reviews only confirmed in-zone aliases in %s',
+    async (topic) => {
+      const owner = 'Legacy.Dept.Example.Test.';
+      const target = 'Archive.Provider.Test.';
+      const absent = (host: string) => ({ host, addresses: [], addressError: null });
+      const cnameRecords = [
+        { owner, target },
+        { owner: owner.toLowerCase(), target: target.toLowerCase() },
+        ...['missing', 'timeout', 'conflict', 'live', 'ambiguous'].map((name) => ({
+          owner: `${name}.example.test`,
+          target,
+        })),
+        { owner: 'ambiguous.example.test', target: 'second.provider.test' },
+        { owner: 'suffix.notexample.test', target },
+      ];
+      const result = await runToolContract(reconGuidanceTool, {
+        topic,
+        findings: {
+          hosts: [],
+          dnsReview: {
+            zone: 'EXAMPLE.TEST.',
+            cnameRecords,
+            addressStatuses: [
+              absent('legacy.dept.example.test'),
+              { ...absent('timeout.example.test'), addressError: 'ETIMEOUT' },
+              absent('conflict.example.test'),
+              { ...absent('CONFLICT.EXAMPLE.TEST.'), addressError: 'ESERVFAIL' },
+              { ...absent('live.example.test'), addresses: ['192.0.2.1'] },
+              absent('ambiguous.example.test'),
+              absent('suffix.notexample.test'),
+              absent('child.missing.example.test'),
+            ],
+          },
+        },
+      });
+      const finding = `${owner}: exported CNAME points to ${target}; supplied address status shows no A or AAAA answers.`;
+      const action = 'Review whether this DNS record should be retained.';
+      expect(result.structuredContent).toMatchObject({
+        priorities: [{ severity: 'low', finding, action }],
+        priorityTotal: 1,
+        nextToolSuggestions: [],
+        suggestionTotal: 0,
+      });
+      expect(result.content[0]).toMatchObject({
+        text: expect.stringContaining(`\`${finding}\` → \`${action}\``),
+      });
+    },
+  );
+
+  it('pages DNS review through the shared priority offsets and leaves an exhausted page empty', async () => {
+    const names = ['example.test', ...Array.from({ length: 51 }, (_, i) => `h${i}.example.test`)];
+    const findings = {
+      hosts: [],
+      dnsReview: {
+        zone: 'example.test',
+        cnameRecords: names.map((owner) => ({ owner, target: 'archive.provider.test' })),
+        addressStatuses: names.map((host) => ({ host, addresses: [], addressError: null })),
+      },
+    };
+    const first = await runToolContract(reconGuidanceTool, { findings, limit: 100 });
+    expect(first.structuredContent).toMatchObject({
+      limit: 50,
+      priorityTotal: 52,
+      priorityReturnedCount: 50,
+      nextPriorityOffset: 50,
+      nextSuggestionOffset: null,
+      truncated: true,
+    });
+    expect(first.content[0]).toMatchObject({
+      text: expect.stringContaining('nextPriorityOffset=50'),
+    });
+    const second = await runToolContract(reconGuidanceTool, { findings, priorityOffset: 50 });
+    expect(second.structuredContent).toMatchObject({
+      priorities: [
+        { finding: expect.stringContaining('h49.example.test') },
+        { finding: expect.stringContaining('h50.example.test') },
+      ],
+      priorityTotal: 52,
+      nextPriorityOffset: null,
+      truncated: false,
+    });
+    expect(second.content[0]).toMatchObject({
+      text: expect.stringContaining('h50.example.test'),
+    });
+    const beyond = await runToolContract(reconGuidanceTool, { findings, priorityOffset: 53 });
+    expect(beyond.structuredContent).toMatchObject({
+      priorities: [],
+      priorityTotal: 52,
+      priorityReturnedCount: 0,
+      nextToolSuggestions: [],
+    });
+    expect(beyond.content[0]).toMatchObject({
+      text: expect.stringContaining('priorityReturnedCount=0'),
+    });
+  });
+
+  it.each(['triage', 'posture'] as const)(
+    'keeps the empty review baseline in %s',
+    async (topic) => {
+      const result = await runToolContract(reconGuidanceTool, {
+        topic,
+        findings: {
+          hosts: [],
+          dnsReview: {
+            zone: 'example.test',
+            cnameRecords: [{ owner: 'example.test', target: 'archive.provider.test' }],
+            addressStatuses:
+              topic === 'posture'
+                ? [{ host: 'example.test', addresses: [], addressError: null }]
+                : [],
+          },
+        },
+      });
+      const finding = 'Assessment coverage is unknown from the supplied findings.';
+      expect(result.structuredContent).toMatchObject({
+        priorities: [{ finding }],
+        nextToolSuggestions: [],
+      });
+      expect(result.content[0]).toMatchObject({ text: expect.stringContaining(finding) });
+    },
+  );
+
+  it.each(['https://example.test', 'example.test/path', '*.example.test', '192.0.2.1'])(
+    'rejects invalid zone %s on both error surfaces',
+    async (zone) => {
+      const result = await runToolContract(reconGuidanceTool, {
+        findings: { hosts: [], dnsReview: { zone, cnameRecords: [], addressStatuses: [] } },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_arguments', recovery: { hint: expect.any(String) } } },
+      });
+      expect(result.content[0]).toMatchObject({
+        text: expect.stringContaining('findings.dnsReview.zone'),
+      });
+      expect(result.content[0]).toMatchObject({
+        text: expect.stringContaining('invalid_arguments'),
+      });
+    },
+  );
 });

@@ -62,6 +62,188 @@ describe('attacksurface_enumerate_subdomains', () => {
     vi.useRealTimers();
   });
 
+  it('keeps legacy offsets for a caller paging a stable Certspotter prefix', async () => {
+    fetchMock.mockImplementation(async (url) => {
+      const after = new URL(String(url)).searchParams.get('after');
+      return Response.json(
+        after ? [] : [{ id: 'first', dns_names: ['z.example.com', 'a.example.com'] }],
+      );
+    });
+    const result = await runToolContract(enumerateSubdomainsTool, {
+      domain: 'example.com',
+      sources: ['certspotter'],
+      offset: 1,
+      limit: 1,
+    });
+    expect(result.structuredContent).toMatchObject({
+      subdomains: [{ name: 'z.example.com' }],
+      nextOffset: null,
+      continuation: null,
+      sourceStatuses: [{ complete: true, pagesFetched: 2 }],
+    });
+    expect(JSON.stringify(result.content)).toContain('complete=true');
+    expect(dnsBoundary.resolve).toHaveBeenCalledTimes(2);
+  });
+
+  it('drains a filtered candidate window before resuming Certspotter with its opaque cursor', async () => {
+    const pages = ['first', 'second', 'third', 'fourth', '9007199254740993', 'final'];
+    const names = ['z', 'b', 'c', 'd', 'e', 'a'];
+    dnsBoundary.resolve.mockImplementation(async (type, host) =>
+      type === 'A' && host === 'a.example.com' ? ['192.0.2.1'] : [],
+    );
+    fetchMock.mockImplementation(async (url) => {
+      const after = new URL(String(url)).searchParams.get('after');
+      const index = after === null ? 0 : pages.indexOf(after) + 1;
+      return Response.json(
+        index === pages.length
+          ? []
+          : [
+              {
+                id: pages[index],
+                dns_names: [`${names[index]}.example.com`],
+              },
+            ],
+      );
+    });
+    const args = {
+      domain: 'example.com',
+      sources: ['certspotter' as const],
+      includeUnresolved: false,
+      limit: 2,
+    };
+    const first = await runToolContract(enumerateSubdomainsTool, args);
+    expect(first.structuredContent).toMatchObject({
+      nextOffset: 2,
+      returnedCount: 0,
+      sourceContinuation: null,
+      sourceStatuses: [{ complete: false, incompleteReason: 'page_cap' }],
+    });
+    const next = enumerateSubdomainsTool.output.parse(first.structuredContent).continuation;
+    const second = await runToolContract(
+      enumerateSubdomainsTool,
+      enumerateSubdomainsTool.input.parse(next?.args),
+    );
+    const tail = enumerateSubdomainsTool.output.parse(second.structuredContent).continuation;
+    const third = await runToolContract(
+      enumerateSubdomainsTool,
+      enumerateSubdomainsTool.input.parse(tail?.args),
+    );
+    const last = enumerateSubdomainsTool.output.parse(third.structuredContent);
+    expect(last).toMatchObject({ nextOffset: null, continuation: null, returnedCount: 0 });
+    expect(last.sourceContinuation?.args).toEqual({
+      ...args,
+      offset: 0,
+      certspotterAfter: '9007199254740993',
+    });
+    expect(JSON.stringify(third.content)).toContain('9007199254740993');
+    fetchMock.mockClear();
+    const resumed = await runToolContract(
+      enumerateSubdomainsTool,
+      enumerateSubdomainsTool.input.parse(last.sourceContinuation?.args),
+    );
+    expect(resumed.structuredContent).toMatchObject({
+      subdomains: [{ name: 'a.example.com' }],
+      nextOffset: null,
+      sourceContinuation: null,
+      sourceStatuses: [{ complete: true, pagesFetched: 2 }],
+    });
+    expect(JSON.stringify(resumed.content)).toContain('sourceContinuation=`null`');
+    expect(
+      fetchMock.mock.calls.map(([url]) => new URL(String(url)).searchParams.get('after')),
+    ).toEqual(['9007199254740993', 'final']);
+  });
+
+  it('retries a changed or failed window at the same offset without resolving another prefix', async () => {
+    let firstPageNames = ['a.example.com', 'b.example.com'];
+    let isRateLimited = true;
+    fetchMock.mockImplementation(async (url) => {
+      const after = new URL(String(url)).searchParams.get('after');
+      if (after === null) return Response.json([{ id: 'first', dns_names: firstPageNames }]);
+      if (isRateLimited) return new Response('', { status: 429, headers: { 'Retry-After': '20' } });
+      return Response.json([]);
+    });
+    const first = await runToolContract(enumerateSubdomainsTool, {
+      domain: 'example.com',
+      sources: ['certspotter'],
+      limit: 1,
+    });
+    expect(first.structuredContent).toMatchObject({
+      sourceStatuses: [{ incompleteReason: 'page_failed', retryAfterMs: 20_000 }],
+      sourceContinuation: null,
+    });
+    expect(JSON.stringify(first.content)).toContain('retryAfterMs=20000');
+    const next = enumerateSubdomainsTool.output.parse(first.structuredContent).continuation;
+    const input = enumerateSubdomainsTool.input.parse(next?.args);
+    dnsBoundary.resolve.mockClear();
+    firstPageNames = ['b.example.com', 'c.example.com'];
+    await expect(enumerateSubdomainsTool.handler(input, context())).rejects.toMatchObject({
+      data: {
+        reason: 'candidate_window_changed',
+        recovery: { hint: expect.stringContaining('same continuation') },
+      },
+    });
+    const changed = await runToolContract(enumerateSubdomainsTool, input);
+    expect(changed.isError).toBe(true);
+    expect(JSON.stringify(changed.content)).toContain('same continuation');
+    expect(dnsBoundary.resolve).not.toHaveBeenCalled();
+    firstPageNames = ['a.example.com', 'b.example.com'];
+    const tail = await runToolContract(enumerateSubdomainsTool, input);
+    expect(tail.structuredContent).toMatchObject({ subdomains: [{ name: 'b.example.com' }] });
+    const source = enumerateSubdomainsTool.output.parse(tail.structuredContent).sourceContinuation;
+    const resume = enumerateSubdomainsTool.input.parse(source?.args);
+    await expect(enumerateSubdomainsTool.handler(resume, context())).rejects.toMatchObject({
+      data: {
+        reason: 'all_sources_failed',
+        recovery: { hint: expect.stringContaining('20000 ms') },
+      },
+    });
+    const failed = await runToolContract(enumerateSubdomainsTool, resume);
+    expect(failed.isError).toBe(true);
+    expect(JSON.stringify(failed.content)).toContain('20000 ms');
+    isRateLimited = false;
+    const done = await runToolContract(enumerateSubdomainsTool, resume);
+    expect(done.structuredContent).toMatchObject({
+      discoveredCount: 0,
+      nextOffset: null,
+      continuation: null,
+      sourceContinuation: null,
+      sourceStatuses: [{ complete: true, pagesFetched: 1 }],
+    });
+  });
+
+  it('stops on a returned start cursor and rejects a continuation without Certspotter', async () => {
+    fetchMock.mockResolvedValue(Response.json([{ id: 'same', dns_names: ['a.example.com'] }]));
+    const input = enumerateSubdomainsTool.input.parse({
+      domain: 'example.com',
+      sources: ['certspotter'],
+      certspotterAfter: 'same',
+    });
+    const result = await runToolContract(enumerateSubdomainsTool, input);
+    expect(result.structuredContent).toMatchObject({
+      sourceStatuses: [{ complete: false, incompleteReason: 'missing_or_repeated_cursor' }],
+      sourceContinuation: null,
+    });
+    expect(JSON.stringify(result.content)).toContain('missing_or_repeated_cursor');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const invalid = enumerateSubdomainsTool.input.parse({ ...input, sources: ['crt.sh'] });
+    await expect(enumerateSubdomainsTool.handler(invalid, context())).rejects.toMatchObject({
+      data: { reason: 'invalid_continuation' },
+    });
+    const invalidResult = await runToolContract(enumerateSubdomainsTool, invalid);
+    expect(invalidResult.isError).toBe(true);
+    expect(JSON.stringify(invalidResult.content)).toContain('original source selection');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(
+      enumerateSubdomainsTool.input.safeParse({ ...input, certspotterAfter: '' }).success,
+    ).toBe(false);
+    expect(
+      enumerateSubdomainsTool.input.safeParse({
+        ...input,
+        candidateWindow: { pages: 6, digest: '0'.repeat(64) },
+      }).success,
+    ).toBe(false);
+  });
+
   it('preselects a bounded sorted candidate prefix and advances a wholly filtered page', async () => {
     const names = Array.from(
       { length: 120 },

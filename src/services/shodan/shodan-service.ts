@@ -63,21 +63,34 @@ export class ShodanService {
     return Boolean(this.config.shodanApiKey);
   }
 
-  /** Single-host lookup. Caller must check `isConfigured()` first. */
-  async lookupHost(ip: string, ctx: Context): Promise<ShodanHostResult> {
+  /** Single-host lookup with bounded excerpts by default. Caller must check `isConfigured()` first. */
+  async lookupHost(ip: string, ctx: Context, bannerDetail?: 'full'): Promise<ShodanHostResult> {
     const key = this.requireKey();
     const url = `${BASE_URL}/shodan/host/${encodeURIComponent(ip)}?key=${encodeURIComponent(key)}`;
     // An unscanned IP (404) is a normal answer for host intelligence, not a failure.
     const raw = await this.fetchJson<RawShodanHost>(url, ctx, 'shodanService.lookupHost', [404]);
 
-    const services: ShodanServiceBanner[] = (raw.data ?? []).map((d) => ({
-      port: d.port ?? 0,
-      ...(d.transport ? { transport: d.transport } : {}),
-      ...(d.product ? { product: d.product } : {}),
-      ...(d.version ? { version: d.version } : {}),
-      ...(d.data ? { banner: d.data.slice(0, BANNER_LIMIT) } : {}),
-      ...(d.timestamp ? { observedAt: d.timestamp } : {}),
-    }));
+    const services: ShodanServiceBanner[] = (raw.data ?? []).map((d) => {
+      const service: ShodanServiceBanner = {
+        port: d.port ?? 0,
+        ...(d.transport ? { transport: d.transport } : {}),
+        ...(d.product ? { product: d.product } : {}),
+        ...(d.version ? { version: d.version } : {}),
+        ...(d.timestamp ? { observedAt: d.timestamp } : {}),
+      };
+      if (typeof d.data !== 'string') return service;
+
+      if (bannerDetail === 'full' || d.data.length <= BANNER_LIMIT) {
+        service.banner = d.data;
+      } else {
+        // If the boundary falls inside a surrogate pair, omit the whole character.
+        const boundary = d.data.slice(BANNER_LIMIT - 1, BANNER_LIMIT + 1);
+        const splitsPair = /^[\uD800-\uDBFF][\uDC00-\uDFFF]$/.test(boundary);
+        service.banner = d.data.slice(0, splitsPair ? BANNER_LIMIT - 1 : BANNER_LIMIT);
+        service.bannerTruncated = true;
+      }
+      return service;
+    });
 
     return {
       ip: raw.ip_str ?? ip,

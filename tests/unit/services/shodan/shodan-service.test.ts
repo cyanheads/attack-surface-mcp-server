@@ -65,6 +65,7 @@ describe('ShodanService', () => {
           product: 'Google DNS',
           version: '1.0',
           banner: 'x'.repeat(512),
+          bannerTruncated: true,
           observedAt: '2025-12-31T00:00:00Z',
         },
       ],

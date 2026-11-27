@@ -147,6 +147,111 @@ describe('attacksurface_lookup_host', () => {
     }
   });
 
+  it('returns only the first 512 ASCII units by default and makes one host request', async () => {
+    const excerpt = 'x'.repeat(512);
+    fetchMock.mockResolvedValue(
+      Response.json({ data: [{ port: 443, data: `${excerpt}TAIL-EVIDENCE` }] }),
+    );
+    const result = await runToolContract(lookupHostTool, { target: '192.0.2.1' });
+    expect(result.structuredContent).toMatchObject({
+      host: { services: [{ port: 443, banner: excerpt }] },
+    });
+    expect(JSON.stringify(result.content)).toContain(excerpt);
+    expect(JSON.stringify(result.content)).not.toContain('TAIL-EVIDENCE');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(new URL(String(fetchMock.mock.calls[0]?.[0])).pathname).toBe('/shodan/host/192.0.2.1');
+  });
+
+  it('marks clipped banners and follows up against the current observation losslessly', async () => {
+    const target = '192.0.2.1';
+    const boundary = 'x'.repeat(512);
+    const prefix = ' '.repeat(511);
+    const assertText = (blocks: Array<{ type: string }>, expected: string) => {
+      expect(blocks).toContainEqual(
+        expect.objectContaining({ type: 'text', text: expect.stringContaining(expected) }),
+      );
+    };
+    fetchMock.mockResolvedValueOnce(
+      Response.json({
+        data: [
+          { port: 80, data: boundary },
+          {
+            port: 443,
+            transport: 'tcp',
+            data: `${prefix}😀old`,
+            timestamp: '2026-01-01T00:00:00Z',
+          },
+          { port: 53 },
+        ],
+      }),
+    );
+    const first = await runToolContract(lookupHostTool, { target });
+    expect(first.structuredContent).toMatchObject({
+      host: {
+        ip: target,
+        services: [
+          { port: 80, banner: boundary },
+          {
+            port: 443,
+            transport: 'tcp',
+            banner: prefix,
+            bannerTruncated: true,
+            observedAt: '2026-01-01T00:00:00Z',
+          },
+          { port: 53 },
+        ],
+      },
+    });
+    const host = lookupHostTool.output.parse(first.structuredContent).host;
+    expect(host?.services[0]).not.toHaveProperty('bannerTruncated');
+    expect(host?.services[2]).not.toHaveProperty('banner');
+    expect(host?.services[2]).not.toHaveProperty('bannerTruncated');
+    expect(first.content).toHaveLength(1);
+    assertText(first.content, 'bannerTruncated=true');
+    const followUp = host?.fullBannerCall;
+    expect(followUp).toMatchObject({
+      toolName: 'attacksurface_lookup_host',
+      args: { target, mode: 'host', bannerDetail: 'full' },
+    });
+    assertText(first.content, JSON.stringify(followUp));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const banner = `  ${'x'.repeat(513)}😀\r\n\r\`\`\`\`\` ~~~ *literal*\\\t\n\u0000  `;
+    fetchMock.mockResolvedValueOnce(
+      Response.json({
+        data: [
+          { port: 443, transport: 'tcp', data: banner, timestamp: '2026-01-02T00:00:00Z' },
+          { port: 53, data: '' },
+        ],
+      }),
+    );
+    const full = await runToolContract(lookupHostTool, lookupHostTool.input.parse(followUp?.args));
+    expect(full.structuredContent).toEqual({
+      mode: 'host',
+      host: {
+        ip: target,
+        hostnames: [],
+        ports: [],
+        services: [
+          { port: 443, transport: 'tcp', banner, observedAt: '2026-01-02T00:00:00Z' },
+          { port: 53, banner: '' },
+        ],
+      },
+    });
+    const textBlock = full.content[0];
+    const text = textBlock?.type === 'text' ? textBlock.text : '';
+    const encodedBanner = text.match(/(`{6})((?:".*"))\1/)?.[2];
+    expect(encodedBanner).toBeDefined();
+    expect(JSON.parse(encodedBanner ?? 'null')).toBe(banner);
+    assertText(full.content, '2026-01-02T00:00:00Z');
+    expect(text).not.toContain('bannerTruncated=true');
+    expect(text).not.toContain('fullBannerCall');
+    expect(fetchMock.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+      '/shodan/host/192.0.2.1',
+      '/shodan/host/192.0.2.1',
+    ]);
+  });
+
   it('returns search matches and facet buckets in search mode', async () => {
     fetchMock.mockResolvedValue(
       Response.json({
@@ -208,6 +313,33 @@ describe('attacksurface_lookup_host', () => {
     ).toBe(false);
   });
 
+  it('omits the follow-up when banners are missing or already complete', async () => {
+    const banner = 'x'.repeat(512);
+    fetchMock.mockResolvedValue(
+      Response.json({ data: [{ port: 443, data: banner }, { port: 53 }] }),
+    );
+    const result = await runToolContract(lookupHostTool, { target: '192.0.2.1' });
+    expect(result.structuredContent).toEqual({
+      mode: 'host',
+      host: {
+        ip: '192.0.2.1',
+        hostnames: [],
+        ports: [],
+        services: [{ port: 443, banner }, { port: 53 }],
+      },
+    });
+    expect(JSON.stringify(result.content)).not.toContain('fullBannerCall');
+    expect(JSON.stringify(result.content)).not.toContain('bannerTruncated');
+  });
+
+  it('rejects an invalid banner selector before requesting Shodan', () => {
+    const result = lookupHostTool.input.safeParse({ target: '192.0.2.1', bannerDetail: 'all' });
+    expect(result.error?.issues).toContainEqual(
+      expect.objectContaining({ path: ['bannerDetail'] }),
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it.each([
     '8.8.8.8',
     '2606:4700:4700::1111',
@@ -229,7 +361,11 @@ describe('attacksurface_lookup_host', () => {
   it('preserves search syntax verbatim and renders empty results', async () => {
     const target = '  org:"Example Org" port:443  ';
     fetchMock.mockResolvedValue(Response.json({ total: 0, matches: [], facets: {} }));
-    const result = await runToolContract(lookupHostTool, { target, mode: 'search' });
+    const result = await runToolContract(lookupHostTool, {
+      target,
+      mode: 'search',
+      bannerDetail: 'full',
+    });
     expect(result.isError).not.toBe(true);
     expect(result.structuredContent).toEqual({
       mode: 'search',
@@ -246,6 +382,9 @@ describe('attacksurface_lookup_host', () => {
     });
     expect(JSON.stringify(result.content)).toContain('0 total match(es)');
     expect(new URL(String(fetchMock.mock.calls[0]?.[0])).searchParams.get('query')).toBe(target);
+    expect(new URL(String(fetchMock.mock.calls[0]?.[0])).searchParams.has('bannerDetail')).toBe(
+      false,
+    );
   });
 
   it.each(['', ' ', '\t\n'])(
@@ -294,15 +433,22 @@ describe('attacksurface_lookup_host', () => {
   it('returns the typed source_unavailable envelope when the key is absent', async () => {
     initShodanService({ ...config, shodanApiKey: undefined });
 
-    await expect(
-      lookupHostTool.handler(lookupHostTool.input.parse({ target: '8.8.8.8' }), context()),
-    ).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      data: {
-        reason: 'source_unavailable',
-        recovery: { hint: expect.stringContaining('SHODAN_API_KEY') },
+    const result = await runToolContract(lookupHostTool, {
+      target: '192.0.2.1',
+      bannerDetail: 'full',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: {
+          reason: 'source_unavailable',
+          recovery: { hint: expect.stringContaining('SHODAN_API_KEY') },
+        },
       },
     });
+    expect(JSON.stringify(result.content)).toContain('source_unavailable');
+    expect(JSON.stringify(result.content)).toContain('SHODAN_API_KEY');
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -310,18 +456,21 @@ describe('attacksurface_lookup_host', () => {
     vi.useFakeTimers();
     fetchMock.mockImplementation(async () => new Response('', { status: 404 }));
 
-    const pending = lookupHostTool.handler(
-      lookupHostTool.input.parse({ target: '8.8.4.4' }),
-      context(),
-    );
-    const rejection = expect(pending).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: {
-        reason: 'no_data',
-        recovery: { hint: expect.stringContaining('map_domain') },
+    const pending = runToolContract(lookupHostTool, { target: '192.0.2.1', bannerDetail: 'full' });
+    await vi.runAllTimersAsync();
+    const result = await pending;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        data: {
+          reason: 'no_data',
+          recovery: { hint: expect.stringContaining('map_domain') },
+        },
       },
     });
-    await vi.runAllTimersAsync();
-    await rejection;
+    expect(JSON.stringify(result.content)).toContain('no_data');
+    expect(JSON.stringify(result.content)).toContain('map_domain');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
